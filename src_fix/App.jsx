@@ -521,7 +521,7 @@ function fileToDataUrl(file, maxDim = 1280, quality = 0.72) {
     reader.onerror = () => reject(reader.error);
     reader.onload = () => {
       const raw = reader.result;
-      const img = new Image();
+      const img = new window.Image();
       img.onerror = () => resolve(raw);
       img.onload = () => {
         try {
