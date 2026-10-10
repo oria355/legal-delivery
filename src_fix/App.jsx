@@ -5605,7 +5605,7 @@ const MIME_EXT = {
   "video/webm": "webm",
   "video/quicktime": "mov",
 };
-const uploadCache = new Map();
+const uploadCache = new window.Map();
 
 // Uploads a data:/blob: URL to the evidence bucket and returns its public URL.
 // Anything that is already a normal URL (or empty) is returned untouched.
