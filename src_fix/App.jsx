@@ -5882,7 +5882,7 @@ function useCloudStore(profile, setters) {
   const pendingRef = useRef(0);
   const dirtyRef = useRef(false);
   const queueRef = useRef(Promise.resolve());
-  const payrollWrittenRef = useRef(new Map());
+  const payrollWrittenRef = useRef(new window.Map());
   const payrollKeysRef = useRef(new Set());
 
   const api = useMemo(() => {
