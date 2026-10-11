@@ -5830,7 +5830,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // (or, better, set VITE_COURIER_WEBHOOK_URL in .env.local / Vercel and leave
 // this line untouched). While the value is not a real https:// URL the app
 // simply skips the webhook call, so registration keeps working.
-const COURIER_WEBHOOK_URL = import.meta.env.VITE_COURIER_WEBHOOK_URL || "PASTE_YOUR_WEBHOOK_URL_HERE";
+const COURIER_WEBHOOK_URL = import.meta.env.VITE_COURIER_WEBHOOK_URL || "https://hook.eu1.make.com/a8tvwuvl8gs1edrpb0gzvc6uh8dnsggf";
 // Recipient of the "new courier" admin email — your scenario's email module
 // can map this field (`notify_email`) or you can hard-code the address there.
 const ADMIN_NOTIFY_EMAIL = "oria355@gmail.com";
