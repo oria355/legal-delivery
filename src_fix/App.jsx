@@ -5990,8 +5990,8 @@ function useCloudStore(profile, setters) {
 
     // Admin only: one payroll document per courier.
     const savePayroll = async (payments, adjustments, couriers) => {
-      const idByName = new Map(couriers.map((c) => [c.name, c.id]));
-      const docs = new Map();
+      const idByName = new window.Map(couriers.map((c) => [c.name, c.id]));
+      const docs = new window.Map();
       const docFor = (name) => {
         const id = idByName.get(name);
         if (!id) return null;
