@@ -105,42 +105,563 @@ const PRICING_ZONES = [
     label: "אזור מקומי (חדרה, פרדס חנה, חריש)",
     short: "אזור מקומי",
     price: 110,
-    cities: ["חדרה", "פרדס חנה-כרכור", "חריש"],
+    cities: [
+      "חדרה",
+      "פרדס חנה-כרכור",
+      "חריש",
+      "גן שמואל",
+      "עין שמר",
+      "להבות חביבה",
+      "מענית",
+      "ברקאי",
+      "אור עקיבא",
+      "קיסריה",
+      "בית אליעזר",
+      "אלוני יצחק",
+      "בנימינה-גבעת עדה",
+      "גבעת עדה",
+      "כפר גליקסון",
+      "עמיקם",
+      "אביאל",
+      "עין עירון",
+      "בית חנניה",
+    ],
   },
   {
     key: "sharon",
     label: "אזור השרון / נתניה",
     short: "שרון / נתניה",
     price: 140,
-    cities: ["נתניה", "כפר יונה", "כפר סבא", "רעננה", "הוד השרון"],
+    cities: [
+      "נתניה",
+      "פולג",
+      "אבן יהודה",
+      "כפר יונה",
+      "כפר סבא",
+      "רעננה",
+      "הוד השרון",
+      "תל מונד",
+      "כוכב יאיר",
+      "צור יצחק",
+      "צור משה",
+      "בית ינאי",
+      "בני דרור",
+      "בארותיים",
+      "בית יצחק-שער חפר",
+      "גבעת חיים איחוד",
+      "גבעת חיים מאוחד",
+      "גבעת שפירא",
+      "חבצלת השרון",
+      "חגור",
+      "ינוב",
+      "כפר ויתקין",
+      "כפר חיים",
+      "כפר מונש",
+      "מכמורת",
+      "מעברות",
+      "משמרת",
+      "נורדיה",
+      "עין החורש",
+      "עין ורד",
+      "שדה ורבורג",
+      "שער אפרים",
+      "תנובות",
+      "אמץ",
+      "אביחיל",
+      "אלישיב",
+      "ביתן אהרן",
+      "בית חרות",
+      "חרב לאת",
+      "יד חנה",
+      "כפר מל\"ל",
+      "כפר ידידיה",
+      "עולש",
+      "פורת",
+      "קדימה-צורן",
+      "רשפון",
+      "תל יצחק",
+      "חופית",
+      "גאולים",
+      "גן יאשיה",
+      "גן חיים",
+      "אליכין",
+      "ג'לג'וליה",
+      "טייבה",
+      "טירה",
+      "קלנסווה",
+      "באקה אל-גרבייה",
+      "ג'ת",
+      "אום אל-פחם",
+      "מעלה עירון",
+      "ערערה",
+      "כפר קרע",
+      "ברטעה",
+      "מועאוויה",
+      "כפר ברא",
+      "בחן",
+      "זכרון יעקב",
+      "צופית",
+      "פרדסיה",
+      "עזריאל",
+      "כפר יעבץ",
+      "בני ציון",
+      "חורשים",
+      "עין שריד",
+      "נירית",
+      "אלישמע",
+      "גנות הדר",
+      "ניצני עוז",
+      "ג'סר א-זרקא",
+      "בת חפר",
+      "בית הלוי",
+    ],
   },
   {
     key: "haifa",
     label: "חיפה והקריות",
     short: "חיפה והקריות",
     price: 160,
-    cities: ["חיפה", "קריית אתא", "קריית ביאליק", "קריית מוצקין", "קריית ים", "נשר"],
+    cities: [
+      "חיפה",
+      "קריית אתא",
+      "קריית ביאליק",
+      "קריית מוצקין",
+      "קריית ים",
+      "נשר",
+      "טירת כרמל",
+      "דאליית אל-כרמל",
+      "עספיא",
+      "עתלית",
+      "נווה ים",
+      "עין הוד",
+      "כרם מהר\"ל",
+      "בית אורן",
+      "מעגן מיכאל",
+      "בת שלמה",
+      "כפר ביאליק",
+      "יגור",
+      "כפר חסידים",
+      "אושה",
+      "כפר המכבי",
+      "רמת יוחנן",
+      "קריית טבעון",
+      "רכסים",
+      "אלונים",
+      "ניר עציון",
+      "נחשולים",
+      "דור",
+      "מעיין צבי",
+      "שדות ים",
+      "עין אילה",
+      "נופית",
+      "חוף הכרמל",
+      "צרופה",
+      "כפר גלים",
+    ],
   },
   {
     key: "center",
     label: "מרכז / גוש דן (אזור תל אביב)",
     short: "מרכז / גוש דן",
     price: 170,
-    cities: ["תל אביב", "רמת גן", "גבעתיים", "בני ברק", "פתח תקווה", "חולון", "בת ים", "הרצליה", "ראשון לציון"],
+    cities: [
+      "תל אביב",
+      "יפו",
+      "רמת גן",
+      "גבעתיים",
+      "בני ברק",
+      "פתח תקווה",
+      "חולון",
+      "בת ים",
+      "הרצליה",
+      "ראשון לציון",
+      "קריית אונו",
+      "אור יהודה",
+      "יהוד-מונוסון",
+      "אזור",
+      "גני תקווה",
+      "גבעת שמואל",
+      "סביון",
+      "כפר שמריהו",
+      "רמת השרון",
+      "ראש העין",
+      "אלעד",
+      "בני עטרות",
+      "נווה מונוסון",
+      "שוהם",
+      "מגשימים",
+      "תל השומר",
+      "גליל ים",
+      "הרצליה פיתוח",
+      "כפר סירקין",
+      "כפר אז\"ר",
+      "עינת",
+    ],
   },
   {
     key: "north_jlm",
     label: "צפון / ירושלים / שפלה",
     short: "צפון / ירושלים / שפלה",
     price: 210,
-    cities: ["ירושלים", "עפולה", "נצרת", "טבריה", "עכו", "נהריה", "כרמיאל", "אשדוד", "רחובות", "לוד", "רמלה", "מודיעין"],
+    cities: [
+      "ירושלים",
+      "מבשרת ציון",
+      "אבו גוש",
+      "מעלה החמישה",
+      "צור הדסה",
+      "בית שמש",
+      "הראל",
+      "קריית ענבים",
+      "צובה",
+      "נטף",
+      "עין נקובא",
+      "אורה",
+      "עמינדב",
+      "בית זית",
+      "תרום",
+      "מוצא עילית",
+      "עין כרם",
+      "נחם",
+      "צרעה",
+      "אשתאול",
+      "קריית יערים",
+      "נווה אילן",
+      "רחובות",
+      "נס ציונה",
+      "לוד",
+      "רמלה",
+      "מודיעין-מכבים-רעות",
+      "מודיעין עילית",
+      "אשדוד",
+      "יבנה",
+      "גדרה",
+      "קריית עקרון",
+      "מזכרת בתיה",
+      "גן יבנה",
+      "באר יעקב",
+      "נצר סרני",
+      "בית דגן",
+      "צריפין",
+      "יד בנימין",
+      "גזר",
+      "שילת",
+      "חדיד",
+      "בן שמן",
+      "שדה עוזיהו",
+      "נתיב הל\"ה",
+      "בית חנן",
+      "כפר ביל\"ו",
+      "כפר אביב",
+      "עשרת",
+      "בני ראם",
+      "גני יוחנן",
+      "בית עזרא",
+      "בני דרום",
+      "גבעת ברנר",
+      "כפר מנחם",
+      "כפר הנגיד",
+      "כפר אוריה",
+      "נען",
+      "גבעתי",
+      "חפץ חיים",
+      "בית אלעזרי",
+      "פלמחים",
+      "ינון",
+      "יסודות",
+      "גן שורק",
+      "סתריה",
+      "נס הרים",
+      "מסלול",
+      "בית נחמיה",
+      "ברקת",
+      "גנות",
+      "מצליח",
+      "מתתיהו",
+      "לפיד",
+      "חשמונאים",
+      "מבוא מודיעין",
+      "נחשונים",
+      "בית עריף",
+      "בית חילקיה",
+      "חולדה",
+      "כפר בן נון",
+      "נוף איילון",
+      "שעלבים",
+      "זרחיה",
+      "עפולה",
+      "נצרת",
+      "נוף הגליל",
+      "טבריה",
+      "עכו",
+      "נהריה",
+      "כרמיאל",
+      "צפת",
+      "קריית שמונה",
+      "מעלות-תרשיחא",
+      "שלומי",
+      "מטולה",
+      "מגדל העמק",
+      "בית שאן",
+      "יקנעם עילית",
+      "יקנעם מושבה",
+      "מגאר",
+      "סח'נין",
+      "עראבה",
+      "דיר חנא",
+      "כאבול",
+      "טמרה",
+      "פקיעין",
+      "ראש פינה",
+      "רמת ישי",
+      "כפר תבור",
+      "יבנאל",
+      "כנרת",
+      "אפיקים",
+      "דגניה א'",
+      "דגניה ב'",
+      "גינוסר",
+      "כפר נהר הירדן",
+      "אלומות",
+      "תל קציר",
+      "עין גב",
+      "מעגן",
+      "אשדות יעקב איחוד",
+      "אשדות יעקב מאוחד",
+      "נוף גינוסר",
+      "שדמות דבורה",
+      "כפר גדעון",
+      "מרחביה",
+      "אילניה",
+      "נהלל",
+      "גבע",
+      "בית אלפא",
+      "חפציבה",
+      "גן נר",
+      "עין חרוד איחוד",
+      "עין חרוד מאוחד",
+      "תל יוסף",
+      "גדעונה",
+      "מזרע",
+      "יפעת",
+      "כפר יהושע",
+      "בית זרע",
+      "בית קשת",
+      "שדה אליהו",
+      "בלפוריה",
+      "אלון הגליל",
+      "שריד",
+      "מגידו",
+      "עין דור",
+      "כפר החורש",
+      "כפר קיש",
+      "ציפורי",
+      "כפר כנא",
+      "ריינה",
+      "עילוט",
+      "יפיע",
+      "זרזיר",
+      "עילבון",
+      "בועיינה-נוג'ידאת",
+      "כסרא-סמיע",
+      "ג'דיידה-מכר",
+      "ג'ולס",
+      "ג'ש",
+      "פסוטה",
+      "מעיליא",
+      "ירכא",
+      "בית ג'ן",
+      "חורפיש",
+      "שייח' דנון",
+      "אבו סנאן",
+      "כפר יסיף",
+      "יאנוח-ג'ת",
+      "עין אל-אסד",
+      "מג'ד אל-כרום",
+      "דיר אל-אסד",
+      "בענה",
+      "נחף",
+      "ראמה",
+      "סאג'ור",
+      "אכסאל",
+      "דבוריה",
+      "קצרין",
+      "מג'דל שמס",
+      "מסעדה",
+      "בוקעאתא",
+      "עין קיניה",
+      "אלוני הבשן",
+      "נאות גולן",
+      "מרום גולן",
+      "רמות",
+      "חספין",
+      "אורטל",
+      "אניעם",
+      "גשור",
+      "כפר חרוב",
+      "קשת",
+      "אליעד",
+      "אל-רום",
+      "יונתן",
+      "מצוק עורבים",
+      "נטור",
+      "ראש הנקרה",
+      "חצור הגלילית",
+      "כפר סאלד",
+      "דפנה",
+      "דן",
+      "שניר",
+      "הגושרים",
+      "כפר בלום",
+      "מנרה",
+      "מרגליות",
+      "יראון",
+      "אביבים",
+      "זרעית",
+      "שתולה",
+      "בצת",
+      "אילון",
+      "גשר הזיו",
+      "לוחמי הגטאות",
+      "עברון",
+      "בן עמי",
+      "אדמית",
+      "מצובה",
+      "חניתה",
+      "כברי",
+      "שבי ציון",
+      "נתיב השיירה",
+      "סער",
+      "בוסתן הגליל",
+      "כפר מנדא",
+      "כמון",
+      "מנוף",
+      "מכמנים",
+      "חרשים",
+      "יובלים",
+      "אשבל",
+      "ארבל",
+      "כורזים",
+      "לביא",
+      "מגדל",
+      "חנתון",
+      "יודפת",
+      "צורית",
+      "שורשים",
+      "מורשת",
+      "לבון",
+      "עצמון שגב",
+      "בר יוחאי",
+      "מירון",
+      "משגב",
+      "כפר ורדים",
+    ],
   },
   {
     key: "south",
     label: "דרום / באר שבע",
     short: "דרום / באר שבע",
     price: 270,
-    cities: ["באר שבע", "אשקלון", "קריית גת", "דימונה", "אילת"],
+    cities: [
+      "באר שבע",
+      "אשקלון",
+      "קריית גת",
+      "קריית מלאכי",
+      "דימונה",
+      "אילת",
+      "נתיבות",
+      "אופקים",
+      "שדרות",
+      "ערד",
+      "ירוחם",
+      "מצפה רמון",
+      "רהט",
+      "להבים",
+      "עומר",
+      "מיתר",
+      "כסייפה",
+      "ערערה בנגב",
+      "שגב שלום",
+      "תל שבע",
+      "לקיה",
+      "חורה",
+      "ביר הדאג'",
+      "אבו קרינאת",
+      "סעד",
+      "נחל עוז",
+      "בארי",
+      "רעים",
+      "אור הנר",
+      "יד מרדכי",
+      "זיקים",
+      "כרמיה",
+      "ניר עם",
+      "ניר עוז",
+      "כפר עזה",
+      "נתיב העשרה",
+      "חולית",
+      "עלומים",
+      "שדה אברהם",
+      "אורים",
+      "מבטחים",
+      "תקומה",
+      "פטיש",
+      "דורות",
+      "שוקדה",
+      "אבשלום",
+      "בית קמה",
+      "גבים",
+      "ניר יצחק",
+      "מגן",
+      "צאלים",
+      "ספיר",
+      "חצבה",
+      "עין יהב",
+      "פארן",
+      "צופר",
+      "עין גדי",
+      "נאות הכיכר",
+      "מצפה שלם",
+      "חצרים",
+      "להב",
+      "כרמית",
+      "גבעות בר",
+      "משמר הנגב",
+      "שדה בוקר",
+      "רביבים",
+      "מבועים",
+      "שובל",
+      "גבעות",
+      "ניצנה",
+      "ניר משה",
+      "עזר",
+      "שפיר",
+      "בית הגדי",
+      "יד נתן",
+      "כוכב מיכאל",
+      "ניר ח\"ן",
+      "תלמי יפה",
+      "תלמי יוסף",
+      "באר גנים",
+      "בת הדר",
+      "מבקיעים",
+      "ניצן",
+      "כפר סילבר",
+      "הודיה",
+      "אלומה",
+      "נועם",
+      "שחר",
+      "ניצנים",
+      "בית הערבה",
+      "מדרשת בן גוריון",
+      "יטבתה",
+      "אילות",
+      "גרופית",
+      "לוטן",
+      "קטורה",
+      "אליפז",
+      "שיטים",
+      "ארז",
+    ],
   },
 ];
 
@@ -149,8 +670,27 @@ const CITIES = PRICING_ZONES.flatMap((z) => z.cities);
 
 // Unknown / legacy cities fall back to the Center zone so an order is never
 // left without a price.
+// City lookup index (built once) — O(1) instead of scanning ~500 names.
+const CITY_ZONE_INDEX = (() => {
+  const m = new window.Map();
+  PRICING_ZONES.forEach((z) => z.cities.forEach((c) => { if (!m.has(c)) m.set(c, z); }));
+  return m;
+})();
+
+// Normalises free-typed city input (trim, unify quotes/dashes/spaces) and
+// resolves it to the canonical spelling used in PRICING_ZONES, or "".
+const CITY_NORMAL_INDEX = (() => {
+  const m = new window.Map();
+  const norm = (t) => String(t || "").replace(/[\u05F3\u2019\u2018`]/g, "'").replace(/[\u2010-\u2015\u05BE]/g, "-").replace(/\s+/g, " ").trim();
+  CITIES.forEach((c) => m.set(norm(c), c));
+  return { m, norm };
+})();
+function normalizeCity(input) {
+  return CITY_NORMAL_INDEX.m.get(CITY_NORMAL_INDEX.norm(input)) || "";
+}
+
 function zoneForCity(city) {
-  return PRICING_ZONES.find((z) => z.cities.includes(city)) || PRICING_ZONES.find((z) => z.key === "center");
+  return CITY_ZONE_INDEX.get(city) || PRICING_ZONES.find((z) => z.key === "center");
 }
 
 // Service speed — mutually exclusive (one delivery has exactly one speed).
@@ -201,48 +741,20 @@ function calcClientPrice(order) {
 // showing the Admin the entire roster every time.
 const REGIONS = ["צפון", "שרון", "מרכז", "שפלה", "דרום"];
 
-const CITY_REGION = {
-  "תל אביב": "מרכז",
-  חדרה: "שרון",
-  נתניה: "שרון",
-  ירושלים: "מרכז",
-  חיפה: "צפון",
-  "ראשון לציון": "שפלה",
-  "פתח תקווה": "מרכז",
-  "פרדס חנה-כרכור": "שרון",
-  חריש: "שרון",
-  "כפר יונה": "שרון",
-  "כפר סבא": "שרון",
-  רעננה: "שרון",
-  "הוד השרון": "שרון",
-  "קריית אתא": "צפון",
-  "קריית ביאליק": "צפון",
-  "קריית מוצקין": "צפון",
-  "קריית ים": "צפון",
-  נשר: "צפון",
-  "רמת גן": "מרכז",
-  גבעתיים: "מרכז",
-  "בני ברק": "מרכז",
-  חולון: "מרכז",
-  "בת ים": "מרכז",
-  הרצליה: "מרכז",
-  עפולה: "צפון",
-  נצרת: "צפון",
-  טבריה: "צפון",
-  עכו: "צפון",
-  נהריה: "צפון",
-  כרמיאל: "צפון",
-  אשדוד: "שפלה",
-  רחובות: "שפלה",
-  לוד: "שפלה",
-  רמלה: "שפלה",
-  מודיעין: "שפלה",
-  "באר שבע": "דרום",
-  אשקלון: "דרום",
-  "קריית גת": "דרום",
-  דימונה: "דרום",
-  אילת: "דרום",
-};
+// Region is derived from the pricing zone (so every one of the ~500 cities
+// is covered) with explicit overrides for the Jerusalem area and the Shfela.
+const ZONE_DEFAULT_REGION = { local: "שרון", sharon: "שרון", haifa: "צפון", center: "מרכז", north_jlm: "צפון", south: "דרום" };
+const REGION_OVERRIDES = (() => {
+  const m = {};
+  ["ירושלים", "מבשרת ציון", "אבו גוש", "מעלה החמישה", "צור הדסה", "בית שמש", "הראל", "קריית ענבים", "צובה", "נטף", "עין נקובא", "אורה", "עמינדב", "בית זית", "תרום", "מוצא עילית", "עין כרם", "נחם", "צרעה", "אשתאול", "קריית יערים", "נווה אילן"].forEach((c) => { m[c] = "מרכז"; });
+  ["רחובות", "נס ציונה", "לוד", "רמלה", "מודיעין-מכבים-רעות", "מודיעין עילית", "אשדוד", "יבנה", "גדרה", "קריית עקרון", "מזכרת בתיה", "גן יבנה", "באר יעקב", "נצר סרני", "בית דגן", "צריפין", "יד בנימין", "גזר", "שילת", "חדיד", "בן שמן", "שדה עוזיהו", "נתיב הל\"ה", "בית חנן", "כפר ביל\"ו", "כפר אביב", "עשרת", "בני ראם", "גני יוחנן", "בית עזרא", "בני דרום", "גבעת ברנר", "כפר מנחם", "כפר הנגיד", "כפר אוריה", "נען", "גבעתי", "חפץ חיים", "בית אלעזרי", "פלמחים", "ינון", "יסודות", "גן שורק", "סתריה", "נס הרים", "מסלול", "בית נחמיה", "ברקת", "גנות", "מצליח", "מתתיהו", "לפיד", "חשמונאים", "מבוא מודיעין", "נחשונים", "בית עריף", "בית חילקיה", "חולדה", "כפר בן נון", "נוף איילון", "שעלבים", "זרחיה", "מודיעין", "ראשון לציון"].forEach((c) => { m[c] = "שפלה"; });
+  return m;
+})();
+const CITY_REGION = (() => {
+  const m = {};
+  PRICING_ZONES.forEach((z) => z.cities.forEach((c) => { m[c] = REGION_OVERRIDES[c] || ZONE_DEFAULT_REGION[z.key]; }));
+  return m;
+})();
 
 // Case-file reference data for the order form and the affidavit.
 const COURTS = [
@@ -358,6 +870,8 @@ const STATUS = {
   DELIVERED: "נמסר",
   REFUSED: "סירוב",
   POSTED: "הדבקה",
+  // Cancelled by the law firm before any courier was assigned.
+  CANCELED: "בוטל",
 };
 
 // Maps the internal action taken by a courier to the Hebrew label stored on
@@ -376,6 +890,7 @@ const STATUS_STYLES = {
   [STATUS.DELIVERED]: { bg: "bg-emerald-50", text: "text-emerald-700", ring: "ring-emerald-200", dot: "bg-emerald-500" },
   [STATUS.REFUSED]: { bg: "bg-rose-50", text: "text-rose-700", ring: "ring-rose-200", dot: "bg-rose-500" },
   [STATUS.POSTED]: { bg: "bg-violet-50", text: "text-violet-700", ring: "ring-violet-200", dot: "bg-violet-500" },
+  [STATUS.CANCELED]: { bg: "bg-slate-100", text: "text-slate-500", ring: "ring-slate-300", dot: "bg-slate-400" },
 };
 
 const NAMES = [
@@ -757,6 +1272,13 @@ function genId(prefix) {
 // affidavit for the courier to sign.
 function isTerminalOrder(o) {
   return o.status === STATUS.DELIVERED || o.status === STATUS.POSTED || o.status === STATUS.REFUSED;
+}
+
+// A law firm may cancel an order only while NO courier has been assigned
+// (the admin has not dispatched it yet). Once `assignedCourier` is set the
+// button disappears — the courier may already be on the way.
+function canCancelOrder(o) {
+  return !!o && !o.assignedCourier && o.status === STATUS.PENDING;
 }
 
 // The courier's signed affidavit lives on the order itself as
@@ -1494,6 +2016,7 @@ function NewOrderForm({ onCreate }) {
   const [form, setForm] = useState(EMPTY_ORDER_FORM);
   const [submitted, setSubmitted] = useState(false);
   const [printingFileError, setPrintingFileError] = useState(false);
+  const [cityError, setCityError] = useState(false);
 
   const update = (key) => (e) =>
     setForm((f) => ({ ...f, [key]: e.target && "value" in e.target ? e.target.value : e }));
@@ -1507,17 +2030,23 @@ function NewOrderForm({ onCreate }) {
   };
 
   // Live quote — same calculator the Admin dashboard uses for its margin.
-  const quote = calcClientPrice(form);
+  const quote = calcClientPrice({ ...form, city: normalizeCity(form.city) || form.city });
 
   const submit = (e) => {
     e.preventDefault();
     if (!form.recipientName || !form.idNumber || !form.phone || !form.street) return;
+    // City must resolve to a known settlement (drives the pricing zone).
+    const canonicalCity = normalizeCity(form.city);
+    if (!canonicalCity) {
+      setCityError(true);
+      return;
+    }
     // The printing service prints the PDF the law firm uploads, so a file is required.
     if (form.addons.printing && !form.fileName) {
       setPrintingFileError(true);
       return;
     }
-    onCreate({ ...form, urgent: form.speed !== "standard" });
+    onCreate({ ...form, city: canonicalCity, urgent: form.speed !== "standard" });
     setForm(EMPTY_ORDER_FORM);
     setSubmitted(true);
     setTimeout(() => setSubmitted(false), 2500);
@@ -1615,18 +2144,24 @@ function NewOrderForm({ onCreate }) {
         <Field label="עיר (קובעת את אזור התמחור)" required>
           <div className="relative">
             <Building2 className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <select className={inputCls + " pr-9 appearance-none"} value={form.city} onChange={update("city")}>
-              {PRICING_ZONES.map((z) => (
-                <optgroup key={z.key} label={`${z.short} — ${formatILS(z.price)}`}>
-                  {z.cities.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              className={inputCls + " pr-9" + (cityError ? " border-rose-400" : "")}
+              list="cities-list"
+              placeholder="התחילו להקליד שם יישוב…"
+              value={form.city}
+              onChange={(e) => { setCityError(false); update("city")(e); }}
+              autoComplete="off"
+              required
+            />
+            <datalist id="cities-list">
+              {PRICING_ZONES.flatMap((z) => z.cities.map((c) => (
+                <option key={c} value={c} label={`${z.short} — ${formatILS(z.price)}`} />
+              )))}
+            </datalist>
+            {cityError && <p className="mt-1 text-xs text-rose-600">יש לבחור יישוב מהרשימה</p>}
+            {!cityError && normalizeCity(form.city) && (
+              <p className="mt-1 text-xs text-slate-500">{zoneForCity(normalizeCity(form.city)).short} — {formatILS(zoneForCity(normalizeCity(form.city)).price)}</p>
+            )}
           </div>
         </Field>
         <Field label="רחוב" required>
@@ -1924,7 +2459,7 @@ function ServiceChips({ order }) {
   );
 }
 
-function OrderDetailsModal({ order, onClose, onOpenAffidavit, showPrice = true }) {
+function OrderDetailsModal({ order, onClose, onOpenAffidavit, onCancel, showPrice = true }) {
   if (!order) return null;
   return (
     <Modal open={!!order} onClose={onClose} title={`תיק ביקורת מסירה — ${order.id}`} wide>
@@ -1933,7 +2468,19 @@ function OrderDetailsModal({ order, onClose, onOpenAffidavit, showPrice = true }
           <StatusBadge status={order.status} />
           <AffidavitBadge order={order} />
           <ServiceChips order={order} />
+          {canCancelOrder(order) && onCancel && (
+            <button
+              type="button"
+              onClick={() => onCancel(order)}
+              className="mr-auto flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-100"
+            >
+              <X className="h-3.5 w-3.5" /> ביטול מסירה
+            </button>
+          )}
         </div>
+        {order.status === STATUS.CANCELED && (
+          <p className="rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-500">ההזמנה בוטלה{order.cancelledAt ? ` ב-${order.cancelledAt}` : ""} ולא תשוגר לשליח.</p>
+        )}
         {(order.caseNumber || order.court || order.plaintiff) && (
           <div className="grid grid-cols-1 gap-3 rounded-lg bg-slate-50 p-3 sm:grid-cols-2">
             <InfoRow label="מספר תיק" value={order.caseNumber || "—"} />
@@ -2038,11 +2585,12 @@ function InfoRow({ label, value, action }) {
 // shows what a lawyer submitting deliveries needs — their own new-order form
 // and a live status table. No courier rates, payroll or admin controls exist
 // anywhere in this component or the data it's handed.
-function LawyerPortal({ orders, onCreate, onSwitchRole, notifications = [], onReadNotification, lockedLawyer = null }) {
+function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notifications = [], onReadNotification, lockedLawyer = null }) {
   const [tab, setTab] = useState("status");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState(null);
   const [affidavitId, setAffidavitId] = useState(null);
+  const [cancelId, setCancelId] = useState(null);
   const [currentLawyer, setCurrentLawyer] = useState(lockedLawyer || LAWYERS[0]);
   const [bellOpen, setBellOpen] = useState(false);
 
@@ -2072,6 +2620,7 @@ function LawyerPortal({ orders, onCreate, onSwitchRole, notifications = [], onRe
   // belongs to another client simply resolves to nothing.
   const selected = myOrders.find((o) => o.id === selectedId) || null;
   const affidavitOrder = myOrders.find((o) => o.id === affidavitId) || null;
+  const cancelTarget = myOrders.find((o) => o.id === cancelId) || null;
 
   // Clicking a notification opens the full audit file of that order (only if
   // it really is one of this lawyer's own) and marks the notification read.
@@ -2274,6 +2823,14 @@ function LawyerPortal({ orders, onCreate, onSwitchRole, notifications = [], onRe
                           >
                             פרטים
                           </button>
+                          {canCancelOrder(o) && onCancelOrder && (
+                            <button
+                              onClick={() => setCancelId(o.id)}
+                              className="flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-100"
+                            >
+                              <X className="h-3.5 w-3.5" /> ביטול מסירה
+                            </button>
+                          )}
                           {isAffidavitSigned(o) && (
                             <button
                               onClick={() => setAffidavitId(o.id)}
@@ -2303,7 +2860,41 @@ function LawyerPortal({ orders, onCreate, onSwitchRole, notifications = [], onRe
           <ProfileTab role="lawyer" subtitle={`מחובר כ: ${currentLawyer}`} onSwitchRole={onSwitchRole} />
         )}
 
-        <OrderDetailsModal order={selected} onClose={() => setSelectedId(null)} onOpenAffidavit={(o) => setAffidavitId(o.id)} />
+        <OrderDetailsModal
+          order={selected}
+          onClose={() => setSelectedId(null)}
+          onOpenAffidavit={(o) => setAffidavitId(o.id)}
+          onCancel={onCancelOrder ? (o) => setCancelId(o.id) : undefined}
+        />
+        <Modal open={!!cancelTarget && canCancelOrder(cancelTarget)} onClose={() => setCancelId(null)} title="ביטול מסירה">
+          {cancelTarget && (
+            <div className="space-y-4">
+              <p className="text-sm text-slate-600">
+                לבטל את ההזמנה <strong>{cancelTarget.id}</strong> עבור <strong>{cancelTarget.recipientName}</strong>? ניתן לבטל רק לפני ששליח שובץ למסירה. הפעולה אינה הפיכה.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onCancelOrder(cancelTarget.id);
+                    setCancelId(null);
+                    setSelectedId(null);
+                  }}
+                  className="flex-1 rounded-lg bg-rose-600 px-3 py-2 text-sm font-semibold text-white hover:bg-rose-700"
+                >
+                  כן, בטל מסירה
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCancelId(null)}
+                  className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                >
+                  חזרה
+                </button>
+              </div>
+            </div>
+          )}
+        </Modal>
         {/* Read-only for the lawyer: shows the courier's signature, with print / download. */}
         <AffidavitModal order={affidavitOrder} onClose={() => setAffidavitId(null)} />
       </div>
@@ -5146,7 +5737,8 @@ function CourierDirectory({ couriers, orders, onRegisterCourier, onApproveCourie
 // Admin-only profitability panel: totals across whatever orders are currently
 // shown (so it follows the stat-card filter), plus a per-zone breakdown.
 function MarginSummary({ orders, pricing }) {
-  const rows = orders.map((o) => ({ o, m: calcOrderMargin(o, pricing) }));
+  // Cancelled orders earn nothing and cost nothing — exclude them.
+  const rows = orders.filter((o) => o.status !== STATUS.CANCELED).map((o) => ({ o, m: calcOrderMargin(o, pricing) }));
   const revenue = rows.reduce((sum, r) => sum + r.m.price.total, 0);
   const cost = rows.reduce((sum, r) => sum + r.m.courierCost, 0);
   const margin = revenue - cost;
@@ -5264,7 +5856,8 @@ function AdminDashboard({
 
   const counts = useMemo(() => {
     return {
-      total: orders.length,
+      total: orders.filter((o) => o.status !== STATUS.CANCELED).length,
+      canceled: orders.filter((o) => o.status === STATUS.CANCELED).length,
       pending: orders.filter((o) => o.status === STATUS.PENDING).length,
       // "בטיפול" includes orders waiting on tomorrow's visit (locked today
       // under the one-visit-per-day rule) — they're still active work, just
@@ -5282,17 +5875,18 @@ function AdminDashboard({
   }, [orders]);
 
   const cards = [
-    { key: "all", label: 'סה"כ מסירות', value: counts.total, icon: FileText, accent: "bg-slate-500", match: () => true },
+    { key: "all", label: 'סה"כ מסירות', value: counts.total, icon: FileText, accent: "bg-slate-500", match: (o) => o.status !== STATUS.CANCELED },
     { key: STATUS.PENDING, label: "ממתינות לשיבוץ", value: counts.pending, icon: Clock, accent: "bg-amber-500", match: (o) => o.status === STATUS.PENDING },
     { key: STATUS.IN_PROGRESS, label: "בטיפול", value: counts.inProgress, icon: Truck, accent: "bg-blue-500", match: (o) => o.status === STATUS.IN_PROGRESS || o.status === STATUS.PENDING_NEXT_VISIT },
     { key: "completed", label: "הושלמו בהצלחה", value: counts.delivered, icon: BadgeCheck, accent: "bg-emerald-500", match: (o) => o.status === STATUS.DELIVERED || o.status === STATUS.POSTED },
     { key: "attention", label: "דורשות טיפול", value: counts.needsAttention, icon: CircleAlert, accent: "bg-rose-500", match: (o) => o.status === STATUS.REFUSED },
+    { key: "canceled", label: "בוטלו", value: counts.canceled, icon: X, accent: "bg-slate-400", match: (o) => o.status === STATUS.CANCELED },
   ];
 
   const filteredOrders = useMemo(() => {
-    if (!activeFilter || activeFilter === "all") return orders;
+    if (!activeFilter) return orders.filter((o) => o.status !== STATUS.CANCELED);
     const card = cards.find((c) => c.key === activeFilter);
-    return orders.filter(card.match);
+    return orders.filter(card ? card.match : () => true);
   }, [orders, activeFilter]);
 
   const byCity = useMemo(() => {
@@ -5381,7 +5975,7 @@ function AdminDashboard({
 
       {dashTab === "overview" && (
         <>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         {cards.map((c) => (
           <StatCard
             key={c.key}
@@ -5830,10 +6424,75 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // (or, better, set VITE_COURIER_WEBHOOK_URL in .env.local / Vercel and leave
 // this line untouched). While the value is not a real https:// URL the app
 // simply skips the webhook call, so registration keeps working.
-const COURIER_WEBHOOK_URL = import.meta.env.VITE_COURIER_WEBHOOK_URL || "https://hook.eu1.make.com/a8tvwuvl8gs1edrpb0gzvc6uh8dnsggf";
+const COURIER_WEBHOOK_URL = import.meta.env.VITE_COURIER_WEBHOOK_URL || "PASTE_YOUR_WEBHOOK_URL_HERE";
 // Recipient of the "new courier" admin email — your scenario's email module
 // can map this field (`notify_email`) or you can hard-code the address there.
 const ADMIN_NOTIFY_EMAIL = "mesirot.express@gmail.com";
+
+// ---------------------------------------------------------------------------
+// NEW ORDER WEBHOOK (Make.com) — SMS & e-mail alerts
+// ---------------------------------------------------------------------------
+// >>> PASTE YOUR MAKE.COM "CUSTOM WEBHOOK" URL FOR NEW ORDERS BELOW <<<
+// (or set VITE_NEW_ORDER_WEBHOOK_URL in .env.local / Vercel). Until it is a
+// real https:// URL the call is skipped and order creation is unaffected.
+const NEW_ORDER_WEBHOOK_URL = import.meta.env.VITE_NEW_ORDER_WEBHOOK_URL || "https://hook.eu1.make.com/98c14e5vysa8cuwjj9rtredki8m1dh3m";
+
+// Fires after an order was SUCCESSFULLY created (cloud: after the DB insert
+// succeeded; demo: right after it is added). Fire-and-forget form-encoded
+// POST in no-cors mode (no preflight) — a webhook failure never affects the order.
+async function notifyNewOrder(o) {
+  if (!/^https:\/\//i.test(NEW_ORDER_WEBHOOK_URL)) {
+    console.warn("New-order webhook skipped: set NEW_ORDER_WEBHOOK_URL (or VITE_NEW_ORDER_WEBHOOK_URL).");
+    return false;
+  }
+  try {
+    const docType = o.docType === "אחר" && o.customDocType ? o.customDocType : o.docType;
+    const zone = zoneForCity(o.city);
+    const price = calcClientPrice(o);
+    const info = o.lawyerInfo || {};
+    const address = `${o.street || ""} ${o.houseNumber || ""}${o.apartment ? "/" + o.apartment : ""}, ${o.city || ""}`.trim();
+    const speedLabel = (SPEED_OPTIONS.find((x) => x.key === (o.speed || "standard")) || SPEED_OPTIONS[0]).label;
+    const message = [
+      "הזמנת מסירה חדשה",
+      `מספר הזמנה: ${o.id}`,
+      `לקוח: ${o.submittedBy || ""}${info.firm ? " (" + info.firm + ")" : ""}`,
+      `נמען: ${o.recipientName}`,
+      `כתובת: ${address}`,
+      `סוג מסמך: ${docType || ""}`,
+      `מהירות: ${speedLabel}`,
+      `מחיר ללקוח: ${formatILS(price.total)}`,
+    ].join("\n");
+    const body = new window.URLSearchParams({
+      event: "new_order",
+      notify_email: ADMIN_NOTIFY_EMAIL,
+      created_at: new window.Date().toISOString(),
+      order_id: String(o.id || ""),
+      client_name: o.submittedBy || "",
+      client_firm: info.firm || "",
+      client_phone: info.phone || "",
+      recipient_name: o.recipientName || "",
+      recipient_phone: o.phone || "",
+      city: o.city || "",
+      address,
+      pricing_zone: zone ? zone.short : "",
+      doc_type: docType || "",
+      case_number: o.caseNumber || "",
+      court: o.court || "",
+      speed: speedLabel,
+      urgent: o.urgent ? "yes" : "no",
+      addons: [o.addons && o.addons.tracing ? "איתור כתובת" : "", o.addons && o.addons.printing ? "הדפסת מסמכים" : ""].filter(Boolean).join(", "),
+      notes: o.notes || "",
+      price_total: String(price.total),
+      subject: `הזמנת מסירה חדשה ${o.id} — ${o.city || ""}`,
+      message,
+    });
+    await window.fetch(NEW_ORDER_WEBHOOK_URL, { method: "POST", mode: "no-cors", body, keepalive: true });
+    return true;
+  } catch (e) {
+    console.warn("New-order webhook failed (the order itself was saved):", e);
+    return false;
+  }
+}
 
 // Fires right after a SUCCESSFUL courier sign-up. Sent as a form-encoded POST
 // in `no-cors` mode: a "simple request" that needs no CORS preflight, which
@@ -6100,6 +6759,7 @@ function useCloudStore(profile, setters) {
           if (!p) {
             const { error: e } = await supabase.from("orders").insert(await orderToRow(o));
             if (e) throw e;
+            notifyNewOrder(o); // only after a successful insert
             continue;
           }
           for (let i = p.attempts.length; i < o.attempts.length; i += 1) {
@@ -6117,6 +6777,19 @@ function useCloudStore(profile, setters) {
           if (!data || !data.length) throw new Error("אין הרשאה לעדכן את ההזמנה " + o.id);
         }
       });
+    };
+
+    // Lawyer/admin cancellation. Goes through a SECURITY DEFINER RPC that
+    // re-checks on the server that no courier is assigned.
+    const cancelOrder = async (id) => {
+      const { error: e } = await supabase.rpc("cancel_order", { p_order_id: id });
+      if (e) {
+        setError(e.message || String(e));
+        dirtyRef.current = true;
+        refreshOrders(); // roll the UI back to what the DB really holds
+        return false;
+      }
+      return true;
     };
 
     const markNotificationRead = async (id) => {
@@ -6198,6 +6871,7 @@ function useCloudStore(profile, setters) {
       refreshCouriers,
       refreshSettings,
       persistOrders,
+      cancelOrder,
       markNotificationRead,
       saveSetting,
       savePayroll,
@@ -6749,18 +7423,19 @@ function AppShell({ profile, onSignOut }) {
     setAdjustments,
   });
   const persistOrders = cloud.persistOrders;
+  const cloudCancelOrder = cloud.cancelOrder;
 
   // Every existing handler updates orders through this setter. It applies the
   // change locally at once (instant UI) and, in cloud mode, hands the
   // before/after lists to the sync engine, which saves only what changed.
   const setOrders = useCallback(
-    (updater) => {
+    (updater, opts) => {
       const prev = ordersRef.current;
       const next = typeof updater === "function" ? updater(prev) : updater;
       if (next === prev) return;
       ordersRef.current = next;
       setOrdersState(next);
-      if (cloudOn) persistOrders(prev, next);
+      if (cloudOn && !(opts && opts.localOnly)) persistOrders(prev, next);
     },
     [cloudOn, persistOrders]
   );
@@ -6853,11 +7528,12 @@ function AppShell({ profile, onSignOut }) {
   }, [cloudOn]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleCreate = useCallback((form) => {
-    setOrders((prev) => [
+    const prevOrders = ordersRef.current;
+    const newOrder = (
       {
         id: cloudOn
           ? `ORD-${window.Date.now().toString(36).toUpperCase()}${Math.floor(Math.random() * 90 + 10)}`
-          : `ORD-${1000 + prev.length + Math.floor(Math.random() * 100)}`,
+          : `ORD-${1000 + prevOrders.length + Math.floor(Math.random() * 100)}`,
         recipientName: form.recipientName,
         idNumber: form.idNumber,
         phone: form.phone,
@@ -6902,10 +7578,29 @@ function AppShell({ profile, onSignOut }) {
               },
             }
           : {}),
-      },
-      ...prev,
-    ]);
+      }
+    );
+    setOrders((prev) => [newOrder, ...prev]);
+    // Cloud mode fires the webhook after the DB insert succeeds (persistOrders);
+    // demo mode has no DB, so it fires right away.
+    if (!cloudOn) notifyNewOrder(newOrder);
   }, [cloudOn, profile, setOrders]);
+
+  // Lawyer cancels an order that has no courier yet. Re-checks the rule against
+  // the latest state, then marks it "בוטל" locally and (cloud) via the RPC.
+  const handleCancelOrder = useCallback((id) => {
+    const current = ordersRef.current.find((o) => o.id === id);
+    if (!canCancelOrder(current)) return false;
+    setOrders(
+      (prev) =>
+        prev.map((o) =>
+          o.id === id ? { ...o, status: STATUS.CANCELED, cancelledAt: nowStamp(0) } : o
+        ),
+      { localOnly: true }
+    );
+    if (cloudOn) cloudCancelOrder(id);
+    return true;
+  }, [cloudOn, cloudCancelOrder, setOrders]);
 
   const handleUpdateOrder = useCallback((id, updater) => {
     setOrders((prev) => prev.map((o) => (o.id === id ? updater(o) : o)));
@@ -7078,6 +7773,7 @@ function AppShell({ profile, onSignOut }) {
           lockedLawyer={cloudOn ? profile.full_name : null}
           orders={orders}
           onCreate={handleCreate}
+          onCancelOrder={handleCancelOrder}
           onSwitchRole={setView}
           notifications={notifications}
           onReadNotification={handleReadNotification}
