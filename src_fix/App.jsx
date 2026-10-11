@@ -5735,7 +5735,7 @@ async function cloudFetchOrders() {
   ]);
   if (o.error) throw o.error;
   if (v.error) throw v.error;
-  const byOrder = new Map();
+  const byOrder = new window.Map();
   (v.data || []).forEach((r) => {
     if (!byOrder.has(r.order_id)) byOrder.set(r.order_id, []);
     byOrder.get(r.order_id).push(r);
@@ -5950,7 +5950,7 @@ function useCloudStore(profile, setters) {
     //   new order      -> INSERT
     //   changed order  -> INSERT the new visits (media uploaded first), then UPDATE the order row
     const persistOrders = (prev, next) => {
-      const prevMap = new Map(prev.map((o) => [o.id, o]));
+      const prevMap = new window.Map(prev.map((o) => [o.id, o]));
       const changed = next.filter((o) => prevMap.get(o.id) !== o);
       if (!changed.length) return;
       enqueue(async () => {
