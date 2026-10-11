@@ -6435,7 +6435,7 @@ const ADMIN_NOTIFY_EMAIL = "mesirot.express@gmail.com";
 // >>> PASTE YOUR MAKE.COM "CUSTOM WEBHOOK" URL FOR NEW ORDERS BELOW <<<
 // (or set VITE_NEW_ORDER_WEBHOOK_URL in .env.local / Vercel). Until it is a
 // real https:// URL the call is skipped and order creation is unaffected.
-const NEW_ORDER_WEBHOOK_URL = import.meta.env.VITE_NEW_ORDER_WEBHOOK_URL || "https://hook.eu1.make.com/98c14e5vysa8cuwjj9rtredki8m1dh3m";
+const NEW_ORDER_WEBHOOK_URL = import.meta.env.VITE_NEW_ORDER_WEBHOOK_URL || "https://hook.eu1.make.com/xwd2rp5x806rh6yhjld9m31y525jr0ph";
 
 // Fires after an order was SUCCESSFULLY created (cloud: after the DB insert
 // succeeded; demo: right after it is added). Fire-and-forget form-encoded
