@@ -5833,7 +5833,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const COURIER_WEBHOOK_URL = import.meta.env.VITE_COURIER_WEBHOOK_URL || "https://hook.eu1.make.com/a8tvwuvl8gs1edrpb0gzvc6uh8dnsggf";
 // Recipient of the "new courier" admin email — your scenario's email module
 // can map this field (`notify_email`) or you can hard-code the address there.
-const ADMIN_NOTIFY_EMAIL = "oria355@gmail.com";
+const ADMIN_NOTIFY_EMAIL = "mesirot.express@gmail.com";
 
 // Fires right after a SUCCESSFUL courier sign-up. Sent as a form-encoded POST
 // in `no-cors` mode: a "simple request" that needs no CORS preflight, which
