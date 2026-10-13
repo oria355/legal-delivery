@@ -829,6 +829,52 @@ function groupCouriersByRegion(city, roster = COURIERS) {
   return { region, local, other };
 }
 
+/* -------------------------------------------------------------------------
+   WOLT-STYLE PICKUP & DISPATCH — pure helpers shared by demo mode, the UI and
+   (mirrored in SQL) the database. A courier never gets an order automatically:
+   they "take" or "decline" it, the manager sees every taker and picks one.
+   A response row is { orderId, courierId, action, outcome, acknowledged, at }.
+   ------------------------------------------------------------------------- */
+const RESPONSE = { TAKE: "take", DECLINE: "decline" };
+const TAKEN_MESSAGE = "המסירה נלקחה, אל דאגה יהיו עוד הרבה בהמשך (:";
+
+function orderRegion(o) {
+  return (o && (o.region || CITY_REGION[o.city])) || "";
+}
+
+// Still waiting for a courier (and not cancelled / already dispatched).
+function isOpenForPickup(o) {
+  return !!o && o.status === STATUS.PENDING && !o.assignedCourier;
+}
+
+// Geo-targeting: the courier's work region must match the order's region and,
+// if the courier limited themselves to specific cities, the city must be one.
+function courierCoversOrder(c, o) {
+  if (!c || c.approvalStatus === "pending") return false;
+  const region = orderRegion(o);
+  if (!region || c.region !== region) return false;
+  return !(c.workCities && c.workCities.length) || c.workCities.includes(o.city);
+}
+
+function findResponse(responses, orderId, courierId) {
+  return responses.find((r) => r.orderId === orderId && r.courierId === courierId) || null;
+}
+
+function upsertResponse(responses, orderId, courierId, action) {
+  const rest = responses.filter((r) => !(r.orderId === orderId && r.courierId === courierId));
+  return [...rest, { orderId, courierId, action, outcome: "pending", acknowledged: false, at: nowStamp(0) }];
+}
+
+// When the manager assigns a courier, every taker is resolved: the chosen one
+// is "selected", everyone else "not_selected" (and sees the friendly message).
+function applyAssignmentToResponses(responses, orderId, courierId) {
+  return responses.map((r) =>
+    r.orderId === orderId && r.action === RESPONSE.TAKE
+      ? { ...r, outcome: r.courierId === courierId ? "selected" : "not_selected", acknowledged: r.courierId === courierId ? true : r.acknowledged }
+      : r
+  );
+}
+
 // Simulated lawyer/firm identities. Every order is stamped with submittedBy
 // on creation, and the Lawyer Portal filters everything it shows — the new
 // order form, the tracking table, live search — to the signed-in lawyer's
@@ -1261,6 +1307,15 @@ function getAllMonthKeys(orders) {
 // own "My Earnings" view so all three always agree on the same record.
 function paymentKey(courier, monthKey) {
   return `${courier}__${monthKey}`;
+}
+
+// Demo mode: next clean order number after the highest existing ORD-<n>.
+function nextDemoOrderId(orders) {
+  const max = orders.reduce((m, o) => {
+    const n = /^ORD-(\d+)$/.exec(o.id);
+    return n ? Math.max(m, Number(n[1])) : m;
+  }, 1000);
+  return `ORD-${max + 1}`;
 }
 
 function genId(prefix) {
@@ -2143,22 +2198,21 @@ function NewOrderForm({ onCreate }) {
         </Field>
         <Field label="עיר (קובעת את אזור התמחור)" required>
           <div className="relative">
-           <input
-  className={inputCls + " pr-9 " + (cityError ? " border-rose-400" : "")}
-  list="cities-data"
-  placeholder="התחילו להקליד שם יישוב..."
-  value={form.city}
-  onChange={(e) => { setCityError(false); update("city")(e); }}
-  autoComplete="off"
-  required
-/>
-<datalist id="cities-data">
-  {PRICING_ZONES.flatMap((z) =>
-    z.cities.map((c) => (
-      <option key={c} value={c} />
-    ))
-  )}
-</datalist>
+            <Building2 className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              className={inputCls + " pr-9" + (cityError ? " border-rose-400" : "")}
+              list="cities-list"
+              placeholder="התחילו להקליד שם יישוב…"
+              value={form.city}
+              onChange={(e) => { setCityError(false); update("city")(e); }}
+              autoComplete="off"
+              required
+            />
+            <datalist id="cities-list">
+              {PRICING_ZONES.flatMap((z) => z.cities.map((c) => (
+                <option key={c} value={c} label={`${z.short} — ${formatILS(z.price)}`} />
+              )))}
+            </datalist>
             {cityError && <p className="mt-1 text-xs text-rose-600">יש לבחור יישוב מהרשימה</p>}
             {!cityError && normalizeCity(form.city) && (
               <p className="mt-1 text-xs text-slate-500">{zoneForCity(normalizeCity(form.city)).short} — {formatILS(zoneForCity(normalizeCity(form.city)).price)}</p>
@@ -4053,7 +4107,144 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
   );
 }
 
-function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, onSubmitPriceRequest, onSwitchRole, couriers, lockedCourier = null }) {
+// helper: names of couriers who declined an order (admin dispatch).
+function declinedNamesFor(orderId, responses, roster) {
+  const names = responses
+    .filter((r) => r.orderId === orderId && r.action === RESPONSE.DECLINE)
+    .map((r) => (roster.find((c) => c.id === r.courierId) || {}).name)
+    .filter(Boolean);
+  return new window.Set(names);
+}
+
+// Manager view under each order: who asked for it (with a one-click assign)
+// and who declined it (red "דחה" tag, so they are not assigned by mistake).
+function DispatchResponses({ order, responses, couriers, onAssign }) {
+  const mine = responses.filter((r) => r.orderId === order.id);
+  if (!mine.length || order.status === STATUS.CANCELED) return null;
+  const nameOf = (id) => (couriers.find((c) => c.id === id) || {}).name || "שליח";
+  const takers = mine.filter((r) => r.action === RESPONSE.TAKE);
+  const decliners = mine.filter((r) => r.action === RESPONSE.DECLINE);
+  const canAssign = !isAssignmentLocked(order);
+  return (
+    <div className="mt-1.5 w-44 space-y-1 text-[11px]">
+      {takers.length > 0 && (
+        <div className="rounded-md bg-emerald-50 p-1.5 ring-1 ring-inset ring-emerald-200">
+          <p className="mb-1 font-semibold text-emerald-700">ביקשו את המשימה ({takers.length})</p>
+          {takers.map((r) => {
+            const name = nameOf(r.courierId);
+            const chosen = order.assignedCourier === name;
+            return (
+              <div key={r.courierId} className="flex items-center justify-between gap-1 py-0.5">
+                <span className="truncate font-medium text-slate-700">{name}</span>
+                {chosen ? (
+                  <span className="flex items-center gap-0.5 text-emerald-700"><Check className="h-3 w-3" /> שובץ</span>
+                ) : (
+                  canAssign && (
+                    <button
+                      type="button"
+                      onClick={() => onAssign(order.id, name)}
+                      className="rounded bg-emerald-600 px-1.5 py-0.5 font-semibold text-white hover:bg-emerald-700"
+                    >
+                      שבץ
+                    </button>
+                  )
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {decliners.map((r) => (
+        <div key={r.courierId} className="flex items-center justify-between gap-1 rounded-md bg-rose-50 px-1.5 py-0.5 ring-1 ring-inset ring-rose-200">
+          <span className="truncate font-medium text-slate-700">{nameOf(r.courierId)}</span>
+          <span className="font-semibold text-rose-600">דחה</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Courier "available orders" tab: open orders of the courier's region, with
+// Take / Decline, plus the friendly message when someone else was chosen.
+function OpenOrdersTab({ openOrders, takenMessages, myResponses, courierId, onRespond, onAcknowledge, notifyState, onEnableNotify }) {
+  return (
+    <div className="space-y-3">
+      {notifyState === "default" && (
+        <button
+          type="button"
+          onClick={onEnableNotify}
+          className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700"
+        >
+          <Bell className="h-4 w-4" /> הפעלת התראות על הזמנות חדשות באזור שלי
+        </button>
+      )}
+      {takenMessages.map((r) => (
+        <div key={r.orderId} className="flex items-start gap-2 rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-800 ring-1 ring-inset ring-amber-200">
+          <span className="flex-1 font-medium">
+            {TAKEN_MESSAGE}
+            <span className="mt-0.5 block text-[11px] font-normal text-amber-600">{r.orderId}</span>
+          </span>
+          <button type="button" onClick={() => onAcknowledge(r.orderId, courierId)} aria-label="סגירה" className="text-amber-500 hover:text-amber-700">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      ))}
+      {openOrders.map((o) => {
+        const answered = myResponses.find((r) => r.orderId === o.id);
+        const taken = answered && answered.action === RESPONSE.TAKE;
+        const speed = SPEED_OPTIONS.find((x) => x.key === speedOf(o)) || SPEED_OPTIONS[0];
+        return (
+          <div key={o.id} className="rounded-2xl border border-slate-200/60 bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <p className="text-sm font-bold text-slate-800">{o.city}</p>
+                <p className="text-xs text-slate-500">{o.docType === "אחר" && o.customDocType ? o.customDocType : o.docType}</p>
+              </div>
+              <div className="flex flex-col items-end gap-1">
+                <span className="text-[11px] font-medium text-slate-400">{o.id}</span>
+                {speedOf(o) !== "standard" && (
+                  <span className="flex items-center gap-0.5 rounded-md bg-amber-50 px-1.5 py-px text-[10px] font-medium text-amber-700 ring-1 ring-inset ring-amber-200">
+                    <Zap className="h-2.5 w-2.5" /> {speed.label}
+                  </span>
+                )}
+              </div>
+            </div>
+            {taken ? (
+              <p className="mt-3 flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">
+                <Hourglass className="h-3.5 w-3.5" /> ביקשת את המשימה — ממתין לאישור המנהל
+              </p>
+            ) : null}
+            <div className="mt-3 flex gap-2">
+              {!taken && (
+                <button
+                  type="button"
+                  onClick={() => onRespond(o.id, courierId, RESPONSE.TAKE)}
+                  className="flex-1 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+                >
+                  קח הזמנה
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => onRespond(o.id, courierId, RESPONSE.DECLINE)}
+                className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+              >
+                דחה
+              </button>
+            </div>
+          </div>
+        );
+      })}
+      {openOrders.length === 0 && takenMessages.length === 0 && (
+        <div className="rounded-2xl border border-dashed border-slate-200/60 py-10 text-center text-sm text-slate-400">
+          אין כרגע הזמנות פתוחות באזור שלך
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, onSubmitPriceRequest, onSwitchRole, couriers, lockedCourier = null, responses = [], onRespond, onAcknowledge, myCourier = null, ready = true }) {
   const courierNames = (couriers || COURIERS).map((c) => c.name);
   const [tab, setTab] = useState("tasks");
   const [currentCourier, setCurrentCourier] = useState(lockedCourier || courierNames[0]);
@@ -4069,6 +4260,56 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
   const [tasksView, setTasksView] = useState("active");
   // The order the courier just finished signing — highlighted in the completed list.
   const [justSignedId, setJustSignedId] = useState(null);
+
+  // --- Wolt-style pickup: open orders of THIS courier's region/cities --------
+  const me = myCourier || (couriers || COURIERS).find((c) => c.name === currentCourier) || null;
+  const myId = me ? me.id : null;
+  const myResponses = responses.filter((r) => r.courierId === myId);
+  const pickupOrders = orders.filter((o) => {
+    if (!isOpenForPickup(o) || !courierCoversOrder(me, o)) return false;
+    const answered = myResponses.find((r) => r.orderId === o.id);
+    return !(answered && answered.action === RESPONSE.DECLINE);
+  });
+  // Friendly "task taken" messages: I asked for it, the manager chose someone else.
+  const takenMessages = myResponses.filter(
+    (r) => r.action === RESPONSE.TAKE && r.outcome === "not_selected" && !r.acknowledged
+  );
+  const [notifyState, setNotifyState] = useState(() =>
+    typeof window.Notification === "undefined" ? "unsupported" : window.Notification.permission
+  );
+  const [newOrderAlert, setNewOrderAlert] = useState(0);
+  const seenPickupRef = useRef({ courier: null, ids: null });
+  const pickupKey = pickupOrders.map((o) => o.id).join("|");
+  // New-order alert: in-app banner + (if allowed) a system notification, fired
+  // only for orders that appear AFTER the first load for this courier.
+  useEffect(() => {
+    if (!ready) return;
+    const ids = pickupOrders.map((o) => o.id);
+    const seen = seenPickupRef.current;
+    if (seen.courier !== currentCourier || seen.ids === null) {
+      seenPickupRef.current = { courier: currentCourier, ids: new window.Set(ids) };
+      setNewOrderAlert(0);
+      return;
+    }
+    const fresh = ids.filter((id) => !seen.ids.has(id));
+    ids.forEach((id) => seen.ids.add(id));
+    if (!fresh.length) return;
+    setNewOrderAlert((n) => n + fresh.length);
+    if (typeof window.Notification !== "undefined" && window.Notification.permission === "granted") {
+      const first = pickupOrders.find((o) => o.id === fresh[0]);
+      new window.Notification("משלוחים משפטיים — הזמנה חדשה באזור שלך", {
+        body: `${first ? first.city : ""} · ${fresh.length > 1 ? fresh.length + " הזמנות חדשות" : first ? first.docType : ""}`,
+      });
+    }
+  }, [pickupKey, ready, currentCourier]); // eslint-disable-line react-hooks/exhaustive-deps
+  const enableNotify = async () => {
+    try {
+      setNotifyState(await window.Notification.requestPermission());
+    } catch (e) {
+      setNotifyState("denied");
+    }
+  };
+
   // Only this courier's own assignments, and only ones still awaiting action —
   // once an order reaches a terminal state (delivered, posted on the door, or
   // a documented refusal), the service is legally complete and it drops off
@@ -4195,6 +4436,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
 
   const navItems = [
     { key: "tasks", label: "משימות", icon: Truck },
+    { key: "open", label: "פתוחות", icon: Bell, badge: pickupOrders.length + takenMessages.length },
     { key: "earnings", label: "הכנסות", icon: Wallet },
     { key: "profile", label: "פרופיל", icon: User },
   ];
@@ -4202,6 +4444,18 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
   return (
     <>
     <div className="mx-auto max-w-md space-y-4 px-4 py-5 pb-24 sm:pb-5">
+      {newOrderAlert > 0 && (
+        <button
+          type="button"
+          onClick={() => {
+            setTab("open");
+            setNewOrderAlert(0);
+          }}
+          className="flex w-full items-center gap-2 rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-sm"
+        >
+          <Bell className="h-4 w-4" /> {newOrderAlert > 1 ? `${newOrderAlert} הזמנות חדשות באזור שלך` : "הזמנה חדשה באזור שלך"} — לחצו לצפייה
+        </button>
+      )}
       <div className="rounded-3xl bg-gradient-to-l from-indigo-600 to-blue-600 p-4 text-white shadow-sm transition-all duration-300 ease-in-out">
         <div className="flex items-center justify-between gap-2">
           <div>
@@ -4250,6 +4504,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
             >
               <Icon className={`h-4 w-4 ${activeTab ? "text-indigo-500" : ""}`} />
               {item.label}
+              {item.badge > 0 && <span className="rounded-full bg-emerald-500 px-1.5 text-[11px] text-white">{item.badge}</span>}
             </button>
           );
         })}
@@ -4368,6 +4623,19 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
             </>
           )}
         </div>
+      )}
+
+      {tab === "open" && (
+        <OpenOrdersTab
+          openOrders={pickupOrders}
+          takenMessages={takenMessages}
+          myResponses={myResponses}
+          courierId={myId}
+          onRespond={onRespond}
+          onAcknowledge={onAcknowledge}
+          notifyState={notifyState}
+          onEnableNotify={enableNotify}
+        />
       )}
 
       {tab === "earnings" && (
@@ -5826,6 +6094,7 @@ function MarginModal({ order, pricing, onClose }) {
 
 function AdminDashboard({
   orders,
+  responses = [],
   onAssignCourier,
   pricing,
   onUpdatePricing,
@@ -6074,24 +6343,18 @@ function AdminDashboard({
                               <option value="">לא משובץ</option>
                               {(() => {
                                 const { region, local, other } = groupCouriersByRegion(o.city, couriers || COURIERS);
+                                // A courier who declined this order can't be assigned to it.
+                                const declined = declinedNamesFor(o.id, responses, couriers || COURIERS);
+                                const opt = (c) => (
+                                  <option key={c} value={c} disabled={declined.has(c)}>
+                                    {c}
+                                    {declined.has(c) ? " — דחה" : ""}
+                                  </option>
+                                );
                                 return (
                                   <>
-                                    <optgroup label={`באזור ${region || ""} (מומלץ)`}>
-                                      {local.map((c) => (
-                                        <option key={c} value={c}>
-                                          {c}
-                                        </option>
-                                      ))}
-                                    </optgroup>
-                                    {other.length > 0 && (
-                                      <optgroup label="שליחים מאזורים אחרים">
-                                        {other.map((c) => (
-                                          <option key={c} value={c}>
-                                            {c}
-                                          </option>
-                                        ))}
-                                      </optgroup>
-                                    )}
+                                    <optgroup label={`באזור ${region || ""} (מומלץ)`}>{local.map(opt)}</optgroup>
+                                    {other.length > 0 && <optgroup label="שליחים מאזורים אחרים">{other.map(opt)}</optgroup>}
                                   </>
                                 );
                               })()}
@@ -6099,6 +6362,12 @@ function AdminDashboard({
                             <ChevronDown className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
                           </div>
                           )}
+                          <DispatchResponses
+                            order={o}
+                            responses={responses}
+                            couriers={couriers || COURIERS}
+                            onAssign={onAssignCourier}
+                          />
                         </td>
                         <td className="px-3 py-2.5">
                           <button
@@ -6222,6 +6491,11 @@ const EVIDENCE_BUCKET = "evidence";
 const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 const CLOUD_ENABLED = !!supabase;
 
+// Public address of the app (verification / password-reset emails send people
+// back here). Set VITE_SITE_URL=https://mesirot.express in production; it falls
+// back to whatever origin the app is running on (localhost, preview URLs).
+const SITE_URL = (import.meta.env.VITE_SITE_URL || window.location.origin).replace(/\/+$/, "");
+
 // Exposes the signed-in profile (or null in demo mode) to nested screens.
 const SessionContext = React.createContext(null);
 
@@ -6276,6 +6550,7 @@ async function orderToRow(o) {
     id: o.id,
     status: o.status,
     city: o.city,
+    region: o.region || CITY_REGION[o.city] || null,
     lawyer_id: lawyerId || null,
     courier_id: courierId || null,
     data,
@@ -6358,6 +6633,8 @@ function courierFromProfile(p) {
     licenseNumber: p.license_number || "",
     businessType: p.business_type || "",
     approvalStatus: p.approval_status || "approved",
+    // Optional: limit pickup alerts to these cities (empty = the whole region).
+    workCities: Array.isArray(p.work_cities) ? p.work_cities : [],
   };
 }
 
@@ -6387,6 +6664,19 @@ async function cloudFetchNotifications(profile) {
     message: n.message,
     createdAt: new window.Date(n.created_at).toLocaleString("he-IL"),
     read: !!n.read,
+  }));
+}
+
+async function cloudFetchResponses() {
+  const { data, error } = await supabase.from("order_responses").select("*");
+  if (error) throw error;
+  return (data || []).map((r) => ({
+    orderId: r.order_id,
+    courierId: r.courier_id,
+    action: r.action,
+    outcome: r.outcome,
+    acknowledged: !!r.acknowledged,
+    at: new window.Date(r.updated_at || r.created_at).toLocaleString("he-IL"),
   }));
 }
 
@@ -6428,7 +6718,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const COURIER_WEBHOOK_URL = import.meta.env.VITE_COURIER_WEBHOOK_URL || "PASTE_YOUR_WEBHOOK_URL_HERE";
 // Recipient of the "new courier" admin email — your scenario's email module
 // can map this field (`notify_email`) or you can hard-code the address there.
-const ADMIN_NOTIFY_EMAIL = "mesirot.express@gmail.com";
+const ADMIN_NOTIFY_EMAIL = "oria355@gmail.com";
 
 // ---------------------------------------------------------------------------
 // NEW ORDER WEBHOOK (Make.com) — SMS & e-mail alerts
@@ -6436,7 +6726,7 @@ const ADMIN_NOTIFY_EMAIL = "mesirot.express@gmail.com";
 // >>> PASTE YOUR MAKE.COM "CUSTOM WEBHOOK" URL FOR NEW ORDERS BELOW <<<
 // (or set VITE_NEW_ORDER_WEBHOOK_URL in .env.local / Vercel). Until it is a
 // real https:// URL the call is skipped and order creation is unaffected.
-const NEW_ORDER_WEBHOOK_URL = import.meta.env.VITE_NEW_ORDER_WEBHOOK_URL || "https://hook.eu1.make.com/xwd2rp5x806rh6yhjld9m31y525jr0ph";
+const NEW_ORDER_WEBHOOK_URL = import.meta.env.VITE_NEW_ORDER_WEBHOOK_URL || "PASTE_NEW_ORDER_WEBHOOK_URL_HERE";
 
 // Fires after an order was SUCCESSFULLY created (cloud: after the DB insert
 // succeeded; demo: right after it is added). Fire-and-forget form-encoded
@@ -6474,6 +6764,7 @@ async function notifyNewOrder(o) {
       recipient_name: o.recipientName || "",
       recipient_phone: o.phone || "",
       city: o.city || "",
+      region: o.region || "",
       address,
       pricing_zone: zone ? zone.short : "",
       doc_type: docType || "",
@@ -6547,6 +6838,8 @@ function useAuth() {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(CLOUD_ENABLED);
   const [profileError, setProfileError] = useState("");
+  // True while the user arrived from a password-reset email and must choose a new password.
+  const [recovery, setRecovery] = useState(() => /type=recovery/.test(window.location.hash + window.location.search));
   const userId = session && session.user ? session.user.id : null;
 
   useEffect(() => {
@@ -6557,7 +6850,10 @@ function useAuth() {
       setSession(data.session);
       if (!data.session) setLoading(false);
     });
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
+      if (event === "PASSWORD_RECOVERY") setRecovery(true);
+      setSession(s);
+    });
     return () => {
       alive = false;
       sub.subscription.unsubscribe();
@@ -6620,7 +6916,7 @@ function useAuth() {
     const { data, error } = await supabase.auth.signUp({
       email: email.trim(),
       password,
-      options: { data: metadata, emailRedirectTo: window.location.origin },
+      options: { data: metadata, emailRedirectTo: SITE_URL },
     });
     if (error) return { error: error.message };
     // With "Confirm email" on, Supabase answers an already-registered address
@@ -6660,9 +6956,26 @@ function useAuth() {
     return res;
   };
 
+  // "Forgot password": Supabase emails a secure one-time link (template:
+  // "Reset Password"). The link signs the user in and the app then shows the
+  // new-password screen (event PASSWORD_RECOVERY).
+  const requestPasswordReset = async (email) => {
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: SITE_URL });
+    return error ? error.message : "";
+  };
+
+  const updatePassword = async (password) => {
+    const { error } = await supabase.auth.updateUser({ password });
+    if (error) return error.message;
+    setRecovery(false);
+    // Drop the recovery token from the address bar.
+    window.history.replaceState(null, "", window.location.pathname);
+    return "";
+  };
+
   const signOut = () => supabase.auth.signOut();
 
-  return { loading, profile, profileError, signIn, signUpLawyer, signUpCourier, refreshProfile, signOut };
+  return { loading, profile, profileError, recovery, requestPasswordReset, updatePassword, signIn, signUpLawyer, signUpCourier, refreshProfile, signOut };
 }
 
 // Loads everything the signed-in role is allowed to see, keeps it live via
@@ -6703,6 +7016,14 @@ function useCloudStore(profile, setters) {
       if (!profileRef.current) return;
       try {
         settersRef.current.setNotifications(await cloudFetchNotifications(profileRef.current));
+      } catch (e) {
+        setError(e.message || String(e));
+      }
+    };
+    const refreshResponses = async () => {
+      if (!profileRef.current) return;
+      try {
+        settersRef.current.setResponses(await cloudFetchResponses());
       } catch (e) {
         setError(e.message || String(e));
       }
@@ -6782,17 +7103,52 @@ function useCloudStore(profile, setters) {
 
     // Lawyer/admin cancellation. Goes through a SECURITY DEFINER RPC that
     // re-checks on the server that no courier is assigned.
-   const cancelOrder = async (id) => {
-  const { error: e } = await supabase.rpc("cancel_order", { p_order_id: id });
-  if (e) {
-    setError(e.message || String(e));
-    dirtyRef.current = true;
-    refreshOrders();
-    return false;
-  }
-  refreshOrders();
-  return true;
-};
+    const cancelOrder = async (id) => {
+      const { error: e } = await supabase.rpc("cancel_order", { p_order_id: id });
+      if (e) {
+        setError(e.message || String(e));
+        dirtyRef.current = true;
+        refreshOrders(); // roll the UI back to what the DB really holds
+        return false;
+      }
+      return true;
+    };
+
+    // Next clean order number (ORD-1001 …) from the database sequence.
+    const nextOrderId = async () => {
+      const { data, error: e } = await supabase.rpc("next_order_id");
+      if (e || !data) {
+        setError((e && e.message) || "לא ניתן להפיק מספר הזמנה");
+        return null;
+      }
+      return data;
+    };
+
+    // A courier's own "take" / "decline" on an open order. The row's primary
+    // key is (order, courier), so a second click flips the existing row.
+    const respondToOrder = async (orderId, action, exists) => {
+      const me = profileRef.current.id;
+      const update = () =>
+        supabase.from("order_responses").update({ action }).eq("order_id", orderId).eq("courier_id", me);
+      let res = exists
+        ? await update()
+        : await supabase.from("order_responses").insert({ order_id: orderId, courier_id: me, action });
+      if (res.error && res.error.code === "23505") res = await update(); // already answered elsewhere
+      if (res.error) {
+        setError(res.error.message || String(res.error));
+        refreshResponses(); // show what was really saved
+      }
+    };
+
+    const acknowledgeResponse = async (orderId) => {
+      const { error: e } = await supabase
+        .from("order_responses")
+        .update({ acknowledged: true })
+        .eq("order_id", orderId)
+        .eq("courier_id", profileRef.current.id);
+      if (e) setError(e.message);
+    };
+
     const markNotificationRead = async (id) => {
       const { error: e } = await supabase.from("notifications").update({ read: true }).eq("id", id);
       if (e) setError(e.message);
@@ -6873,6 +7229,10 @@ function useCloudStore(profile, setters) {
       refreshSettings,
       persistOrders,
       cancelOrder,
+      nextOrderId,
+      refreshResponses,
+      respondToOrder,
+      acknowledgeResponse,
       markNotificationRead,
       saveSetting,
       savePayroll,
@@ -6892,6 +7252,7 @@ function useCloudStore(profile, setters) {
         api.refreshNotifications(),
         api.refreshCouriers(),
         api.refreshSettings(),
+        api.refreshResponses(),
       ]);
       if (alive) setReady(true);
     })();
@@ -6908,6 +7269,9 @@ function useCloudStore(profile, setters) {
       .on("postgres_changes", { event: "*", schema: "public", table: "notifications" }, () =>
         later("n", api.refreshNotifications)
       )
+      .on("postgres_changes", { event: "*", schema: "public", table: "order_responses" }, () =>
+        later("r", api.refreshResponses)
+      )
       .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => later("p", api.refreshCouriers))
       .on("postgres_changes", { event: "*", schema: "public", table: "settings" }, () => later("s", api.refreshSettings))
       .subscribe();
@@ -6919,6 +7283,62 @@ function useCloudStore(profile, setters) {
   }, [profileId, api]);
 
   return { ready, error, clearError: () => setError(""), ...api };
+}
+
+// Shown after the user clicks the link in the password-reset email.
+function ResetPasswordScreen({ onUpdate, onSignOut }) {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (e) => {
+    e.preventDefault();
+    if (pw.length < 6) return setError("הסיסמה קצרה מדי (לפחות 6 תווים).");
+    if (pw !== pw2) return setError("הסיסמאות אינן תואמות.");
+    setBusy(true);
+    setError("");
+    const err = await onUpdate(pw);
+    if (err) setError(friendlyAuthError(err));
+    setBusy(false);
+  };
+  return (
+    <div dir="rtl" style={{ fontFamily: "'Heebo', sans-serif" }} className="flex min-h-screen items-center justify-center bg-[#f8f9fa] px-4 py-8">
+      <form onSubmit={submit} className="w-full max-w-sm rounded-3xl border border-slate-200/60 bg-white p-6 shadow-sm">
+        <div className="mb-5 flex items-center gap-2.5">
+          <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 to-blue-600 text-white">
+            <Lock className="h-5 w-5" />
+          </div>
+          <div className="leading-tight">
+            <p className="text-base font-extrabold text-indigo-700">בחירת סיסמה חדשה</p>
+            <p className="text-xs text-slate-400">משלוחים משפטיים</p>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <Field label="סיסמה חדשה" required>
+            <input type="password" dir="ltr" className={inputCls} value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="new-password" required />
+          </Field>
+          <Field label="אימות סיסמה" required>
+            <input type="password" dir="ltr" className={inputCls} value={pw2} onChange={(e) => setPw2(e.target.value)} autoComplete="new-password" required />
+          </Field>
+        </div>
+        {error && (
+          <p role="alert" className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700 ring-1 ring-inset ring-rose-200">
+            {error}
+          </p>
+        )}
+        <button
+          type="submit"
+          disabled={busy}
+          className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-indigo-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60"
+        >
+          {busy && <RefreshCw className="h-4 w-4 animate-spin" />} עדכון סיסמה
+        </button>
+        <button type="button" onClick={onSignOut} className="mt-3 w-full text-center text-xs font-medium text-slate-500 hover:text-indigo-600">
+          ביטול
+        </button>
+      </form>
+    </div>
+  );
 }
 
 function FullScreenLoader({ text = "טוען..." }) {
@@ -6937,6 +7357,7 @@ function friendlyAuthError(msg) {
   if (/email not confirmed/i.test(msg)) return "האימייל טרם אומת. בדקו את תיבת הדואר שלכם ולחצו על קישור האימות.";
   if (/already registered/i.test(msg)) return "כתובת האימייל כבר רשומה במערכת. נסו להתחבר.";
   if (/at least \d+ characters/i.test(msg)) return "הסיסמה קצרה מדי (לפחות 6 תווים).";
+  if (/same password|different from the old/i.test(msg)) return "הסיסמה החדשה חייבת להיות שונה מהקודמת.";
   if (/rate limit|too many/i.test(msg)) return "בוצעו יותר מדי ניסיונות. נסו שוב בעוד כמה דקות.";
   return msg;
 }
@@ -6959,7 +7380,7 @@ const EMPTY_COURIER_FORM = {
 //   mode "lawyer"  law firm / company: name, email, password
 //   mode "courier" courier join request: name, phone, city, region, license, business type
 //   mode "sent"    "check your inbox to verify your email" confirmation
-function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, profileError }) {
+function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPassword, profileError }) {
   const [mode, setMode] = useState("in");
   const [login, setLogin] = useState({ email: "", password: "" });
   const [lawyer, setLawyer] = useState(EMPTY_LAWYER_FORM);
@@ -6983,6 +7404,16 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, profileError }
     setError("");
     const err = await onSignIn(login.email, login.password);
     if (err) setError(friendlyAuthError(err));
+    setBusy(false);
+  };
+
+  const submitForgot = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    const err = await onResetPassword(login.email);
+    if (err) setError(friendlyAuthError(err));
+    else setMode("forgotSent");
     setBusy(false);
   };
 
@@ -7019,6 +7450,8 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, profileError }
     lawyer: { title: "פתיחת חשבון", sub: "משרד עורכי דין / חברה", icon: Briefcase },
     courier: { title: "בקשת הצטרפות לשליחים", sub: "מלאו את הפרטים ונחזור אליכם לאחר אישור", icon: Truck },
     sent: { title: "בדקו את תיבת הדואר", sub: "נשלח אליכם מייל אימות", icon: Mail },
+    forgot: { title: "שכחתי סיסמה", sub: "נשלח אליכם קישור מאובטח לאיפוס", icon: Lock },
+    forgotSent: { title: "בדקו את תיבת הדואר", sub: "נשלח קישור לאיפוס סיסמה", icon: Mail },
   };
   const head = titles[mode];
   const HeadIcon = head.icon;
@@ -7101,6 +7534,13 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, profileError }
               </div>
               {errorBox}
               {submitBtn("התחברות")}
+              <button
+                type="button"
+                onClick={() => goto("forgot")}
+                className="mt-3 w-full text-center text-xs font-medium text-slate-500 hover:text-indigo-600 hover:underline"
+              >
+                שכחתי סיסמה
+              </button>
             </form>
 
             <button
@@ -7123,6 +7563,35 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, profileError }
               <Truck className="h-4 w-4" /> שליח חדש? הגשת בקשת הצטרפות
             </button>
           </>
+        )}
+
+        {/* ---------------- Forgot password ---------------- */}
+        {mode === "forgot" && (
+          <form onSubmit={submitForgot}>
+            <Field label="אימייל החשבון" required>
+              <input
+                type="email"
+                dir="ltr"
+                className={inputCls}
+                value={login.email}
+                onChange={setLoginField("email")}
+                autoComplete="email"
+                required
+              />
+            </Field>
+            {errorBox}
+            {submitBtn("שליחת קישור לאיפוס סיסמה")}
+            {backLink}
+          </form>
+        )}
+        {mode === "forgotSent" && (
+          <div className="space-y-3 text-sm text-slate-600">
+            <p>
+              אם קיים חשבון עבור <strong dir="ltr">{login.email.trim()}</strong>, נשלח אליו כעת מייל עם קישור מאובטח לאיפוס הסיסמה.
+            </p>
+            <p className="text-xs text-slate-400">לא קיבלתם? בדקו בתיקיית הספאם, או נסו שוב בעוד דקה.</p>
+            {backLink}
+          </div>
         )}
 
         {/* ---------------- Law firm / company registration ---------------- */}
@@ -7371,12 +7840,26 @@ export default function App() {
   const auth = useAuth();
   if (!CLOUD_ENABLED) return <AppShell profile={null} />;
   if (auth.loading) return <FullScreenLoader text="מתחבר..." />;
+  // Arrived from the password-reset email: choose a new password first.
+  if (auth.recovery) {
+    return (
+      <ResetPasswordScreen
+        onUpdate={auth.updatePassword}
+        onSignOut={() => {
+          auth.signOut();
+          window.history.replaceState(null, "", window.location.pathname);
+          window.location.reload();
+        }}
+      />
+    );
+  }
   if (!auth.profile) {
     return (
       <LoginScreen
         onSignIn={auth.signIn}
         onSignUpLawyer={auth.signUpLawyer}
         onSignUpCourier={auth.signUpCourier}
+        onResetPassword={auth.requestPasswordReset}
         profileError={auth.profileError}
       />
     );
@@ -7409,6 +7892,10 @@ function AppShell({ profile, onSignOut }) {
   // the moment any order is completed AND its affidavit signed — whoever
   // signed it (courier or Admin) — so every portal reads one shared source.
   const [notifications, setNotifications] = useState([]);
+  // Couriers' "take" / "decline" answers on open orders (see RESPONSE helpers).
+  const [responses, setResponses] = useState([]);
+  const responsesRef = useRef(responses);
+  responsesRef.current = responses;
 
   // Cloud store: loads the role-scoped data, subscribes to Realtime and saves
   // changes (a no-op in demo mode, where `profile` is null).
@@ -7418,6 +7905,7 @@ function AppShell({ profile, onSignOut }) {
       setOrdersState(list);
     },
     setNotifications,
+    setResponses,
     setCouriers,
     setPricing,
     setPayments,
@@ -7425,6 +7913,9 @@ function AppShell({ profile, onSignOut }) {
   });
   const persistOrders = cloud.persistOrders;
   const cloudCancelOrder = cloud.cancelOrder;
+  const cloudNextOrderId = cloud.nextOrderId;
+  const cloudRespond = cloud.respondToOrder;
+  const cloudAcknowledge = cloud.acknowledgeResponse;
 
   // Every existing handler updates orders through this setter. It applies the
   // change locally at once (instant UI) and, in cloud mode, hands the
@@ -7528,13 +8019,16 @@ function AppShell({ profile, onSignOut }) {
     ]);
   }, [cloudOn]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleCreate = useCallback((form) => {
-    const prevOrders = ordersRef.current;
+  const handleCreate = useCallback(async (form) => {
+    // Clean, human-readable number (ORD-1001, ORD-1002 …): the database hands
+    // out the next one in cloud mode; demo mode continues after the highest.
+    const id = cloudOn ? await cloudNextOrderId() : nextDemoOrderId(ordersRef.current);
+    if (!id) return; // the cloud error banner already explains why
     const newOrder = (
       {
-        id: cloudOn
-          ? `ORD-${window.Date.now().toString(36).toUpperCase()}${Math.floor(Math.random() * 90 + 10)}`
-          : `ORD-${1000 + prevOrders.length + Math.floor(Math.random() * 100)}`,
+        id,
+        // Drives geo-targeted pickup: only couriers of this region see the order.
+        region: CITY_REGION[form.city] || "",
         recipientName: form.recipientName,
         idNumber: form.idNumber,
         phone: form.phone,
@@ -7585,7 +8079,7 @@ function AppShell({ profile, onSignOut }) {
     // Cloud mode fires the webhook after the DB insert succeeds (persistOrders);
     // demo mode has no DB, so it fires right away.
     if (!cloudOn) notifyNewOrder(newOrder);
-  }, [cloudOn, profile, setOrders]);
+  }, [cloudOn, profile, setOrders, cloudNextOrderId]);
 
   // Lawyer cancels an order that has no courier yet. Re-checks the rule against
   // the latest state, then marks it "בוטל" locally and (cloud) via the RPC.
@@ -7634,11 +8128,39 @@ function AppShell({ profile, onSignOut }) {
     );
   }, []);
 
+  // Courier answers an open order. Re-checks that it is still open.
+  const handleRespond = useCallback(
+    (orderId, courierId, action) => {
+      const order = ordersRef.current.find((o) => o.id === orderId);
+      if (!isOpenForPickup(order)) return;
+      const exists = !!findResponse(responsesRef.current, orderId, courierId);
+      setResponses((prev) => upsertResponse(prev, orderId, courierId, action));
+      if (cloudOn) cloudRespond(orderId, action, exists);
+    },
+    [cloudOn, cloudRespond]
+  );
+
+  // Courier dismisses the "task taken" message.
+  const handleAcknowledge = useCallback(
+    (orderId, courierId) => {
+      setResponses((prev) =>
+        prev.map((r) => (r.orderId === orderId && r.courierId === courierId ? { ...r, acknowledged: true } : r))
+      );
+      if (cloudOn) cloudAcknowledge(orderId);
+    },
+    [cloudOn, cloudAcknowledge]
+  );
+
   const handleAssignCourier = useCallback(
     (id, courier) => {
       // The courier's id (for Row Level Security) and a snapshot of the
       // details the affidavit needs travel with the order.
       const c = couriers.find((x) => x.name === courier);
+      const target = ordersRef.current.find((o) => o.id === id);
+      // Resolve the pickup requests: chosen courier selected, the rest "taken".
+      if (c && target && !isAssignmentLocked(target)) {
+        setResponses((prev) => applyAssignmentToResponses(prev, id, c.id));
+      }
       setOrders((prev) =>
         prev.map((o) =>
           o.id === id && !isAssignmentLocked(o)
@@ -7791,11 +8313,17 @@ function AppShell({ profile, onSignOut }) {
           onSubmitPriceRequest={handleSubmitPriceRequest}
           onSwitchRole={setView}
           couriers={couriers}
+          responses={responses}
+          onRespond={handleRespond}
+          onAcknowledge={handleAcknowledge}
+          myCourier={cloudOn ? courierFromProfile(profile) : null}
+          ready={!cloudOn || cloud.ready}
         />
       )}
       {view === "admin" && (
         <AdminDashboard
           orders={orders}
+          responses={responses}
           onAssignCourier={handleAssignCourier}
           pricing={pricing}
           onUpdatePricing={handleUpdatePricing}
@@ -7815,7 +8343,6 @@ function AppShell({ profile, onSignOut }) {
         />
       )}
     </div>
-   
-</SessionContext.Provider>
+    </SessionContext.Provider>
   );
 }
