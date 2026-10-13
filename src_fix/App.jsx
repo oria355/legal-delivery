@@ -2150,7 +2150,7 @@ function NewOrderForm({ onCreate }) {
               placeholder="התחילו להקליד שם יישוב…"
               value={form.city}
               onChange={(e) => { setCityError(false); update("city")(e); }}
-              autoComplete="off"
+              autoComplete="on"
               required
             />
             <datalist id="cities-list">
