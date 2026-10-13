@@ -2144,20 +2144,21 @@ function NewOrderForm({ onCreate }) {
         <Field label="עיר (קובעת את אזור התמחור)" required>
           <div className="relative">
             <Building2 className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <input
-              className={inputCls + " pr-9" + (cityError ? " border-rose-400" : "")}
-              list="cities-list"
-              placeholder="התחילו להקליד שם יישוב…"
-              value={form.city}
-              onChange={(e) => { setCityError(false); update("city")(e); }}
-              autoComplete="on"
-              required
-            />
-            <datalist id="cities-list">
-              {PRICING_ZONES.flatMap((z) => z.cities.map((c) => (
-                <option key={c} value={c} label={`${z.short} — ${formatILS(z.price)}`} />
-              )))}
-            </datalist>
+           <select
+  className={inputCls + " pr-9 " + (cityError ? " border-rose-400" : "")}
+  value={form.city}
+  onChange={(e) => { setCityError(false); update("city")(e); }}
+  required
+>
+  <option value="" disabled hidden>התחילו להקליד שם יישוב...</option>
+  {PRICING_ZONES.flatMap((z) =>
+    z.cities.map((c) => (
+      <option key={c} value={c}>
+        {c} - {z.short} - {formatILS(z.price)}
+      </option>
+    ))
+  )}
+</select>
             {cityError && <p className="mt-1 text-xs text-rose-600">יש לבחור יישוב מהרשימה</p>}
             {!cityError && normalizeCity(form.city) && (
               <p className="mt-1 text-xs text-slate-500">{zoneForCity(normalizeCity(form.city)).short} — {formatILS(zoneForCity(normalizeCity(form.city)).price)}</p>
