@@ -7814,6 +7814,71 @@ function AppShell({ profile, onSignOut }) {
         />
       )}
     </div>
-    </SessionContext.Provider>
+     <datalist id="cities-list">
+  <option value="אבן יהודה" />
+  <option value="אופקים" />
+  <option value="אור יהודה" />
+  <option value="אור עקיבא" />
+  <option value="אילת" />
+  <option value="אלעד" />
+  <option value="אריאל" />
+  <option value="אשדוד" />
+  <option value="אשקלון" />
+  <option value="באר שבע" />
+  <option value="בית שאן" />
+  <option value="בית שמש" />
+  <option value="ביתר עילית" />
+  <option value="בני ברק" />
+  <option value="בת ים" />
+  <option value="גבעת שמואל" />
+  <option value="גבעתיים" />
+  <option value="גדרה" />
+  <option value="הוד השרון" />
+  <option value="הרצליה" />
+  <option value="חדרה" />
+  <option value="חולון" />
+  <option value="חיפה" />
+  <option value="טבריה" />
+  <option value="טירת כרמל" />
+  <option value="יבנה" />
+  <option value="יהוד-מונוסון" />
+  <option value="ירושלים" />
+  <option value="כפר סבא" />
+  <option value="כרמיאל" />
+  <option value="לוד" />
+  <option value="מגדל העמק" />
+  <option value="מודיעין-מכבים-רעות" />
+  <option value="מעלה אדומים" />
+  <option value="נהריה" />
+  <option value="נס ציונה" />
+  <option value="נצרת" />
+  <option value="נתיבות" />
+  <option value="נתניה" />
+  <option value="עכו" />
+  <option value="עפולה" />
+  <option value="ערד" />
+  <option value="פתח תקווה" />
+  <option value="צפת" />
+  <option value="קרית אונו" />
+  <option value="קרית אתא" />
+  <option value="קרית ביאליק" />
+  <option value="קרית גת" />
+  <option value="קרית טבעון" />
+  <option value="קרית ים" />
+  <option value="קרית מוצקין" />
+  <option value="קרית מלאכי" />
+  <option value="קרית שמונה" />
+  <option value="ראש העין" />
+  <option value="ראשון לציון" />
+  <option value="רהט" />
+  <option value="רחובות" />
+  <option value="רמלה" />
+  <option value="רמת גן" />
+  <option value="רמת השרון" />
+  <option value="רעננה" />
+  <option value="שדרות" />
+  <option value="תל אביב-יפו" />
+</datalist>
+</SessionContext.Provider>
   );
 }
