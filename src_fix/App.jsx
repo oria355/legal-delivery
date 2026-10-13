@@ -2143,22 +2143,22 @@ function NewOrderForm({ onCreate }) {
         </Field>
         <Field label="עיר (קובעת את אזור התמחור)" required>
           <div className="relative">
-            <Building2 className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-           <select
+           <input
   className={inputCls + " pr-9 " + (cityError ? " border-rose-400" : "")}
+  list="cities-data"
+  placeholder="התחילו להקליד שם יישוב..."
   value={form.city}
   onChange={(e) => { setCityError(false); update("city")(e); }}
+  autoComplete="off"
   required
->
-  <option value="" disabled hidden>התחילו להקליד שם יישוב...</option>
+/>
+<datalist id="cities-data">
   {PRICING_ZONES.flatMap((z) =>
     z.cities.map((c) => (
-      <option key={c} value={c}>
-        {c} - {z.short} - {formatILS(z.price)}
-      </option>
+      <option key={c} value={c} />
     ))
   )}
-</select>
+</datalist>
             {cityError && <p className="mt-1 text-xs text-rose-600">יש לבחור יישוב מהרשימה</p>}
             {!cityError && normalizeCity(form.city) && (
               <p className="mt-1 text-xs text-slate-500">{zoneForCity(normalizeCity(form.city)).short} — {formatILS(zoneForCity(normalizeCity(form.city)).price)}</p>
