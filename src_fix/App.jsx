@@ -6781,40 +6781,17 @@ function useCloudStore(profile, setters) {
 
     // Lawyer/admin cancellation. Goes through a SECURITY DEFINER RPC that
     // re-checks on the server that no courier is assigned.
-    const cancelOrder = async (id) => {
-const cancelOrder = async (id) => {
+   const cancelOrder = async (id) => {
   const { error: e } = await supabase.rpc("cancel_order", { p_order_id: id });
-  
   if (e) {
     setError(e.message || String(e));
     dirtyRef.current = true;
     refreshOrders();
     return false;
   }
-  
-  refreshOrders(); 
+  refreshOrders();
   return true;
 };
-    
-  if (e) {
-    setError(e.message || String(e));
-    dirtyRef.current = true;
-    refreshOrders();
-    return false;
-  }
-  
-  refreshOrders(); // <--- השורה הזו שואבת מחדש את הרשימה הנקייה ומעלימה את ההזמנה מהמסך מיד!
-  return true;
-};
-      if (e) {
-        setError(e.message || String(e));
-        dirtyRef.current = true;
-        refreshOrders(); // roll the UI back to what the DB really holds
-        return false;
-      }
-      return true;
-    };
-
     const markNotificationRead = async (id) => {
       const { error: e } = await supabase.from("notifications").update({ read: true }).eq("id", id);
       if (e) setError(e.message);
