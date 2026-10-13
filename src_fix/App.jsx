@@ -6782,10 +6782,22 @@ function useCloudStore(profile, setters) {
     // Lawyer/admin cancellation. Goes through a SECURITY DEFINER RPC that
     // re-checks on the server that no courier is assigned.
     const cancelOrder = async (id) => {
-const { error: e } = await supabase
-  .from("orders")
-  .delete()
-  .eq("id", id);
+const cancelOrder = async (id) => {
+  const { error: e } = await supabase
+    .from("orders")
+    .delete()
+    .eq("id", id);
+    
+  if (e) {
+    setError(e.message || String(e));
+    dirtyRef.current = true;
+    refreshOrders();
+    return false;
+  }
+  
+  refreshOrders(); // <--- השורה הזו שואבת מחדש את הרשימה הנקייה ומעלימה את ההזמנה מהמסך מיד!
+  return true;
+};
       if (e) {
         setError(e.message || String(e));
         dirtyRef.current = true;
