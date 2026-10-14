@@ -6565,7 +6565,56 @@ const URL_AUTH_INTENT = (() => {
   const raw = window.location.hash + "&" + window.location.search;
   return { verified: /type=(signup|email)\b/.test(raw), recovery: /type=recovery\b/.test(raw) };
 })();
-const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+// "הישאר מחובר": where Supabase keeps the session token.
+//   checked   -> localStorage   (survives restarts, shared by all tabs)
+//   unchecked -> sessionStorage (this tab only; a new tab or a restart needs a fresh login)
+// The choice itself is a harmless flag in localStorage. The adapter below is
+// consulted on every read/write, so flipping the flag at login switches the store.
+const STAY_KEY = "mesirot-stay-logged-in";
+const readStayLoggedIn = () => {
+  try {
+    return window.localStorage.getItem(STAY_KEY) !== "0";
+  } catch (e) {
+    return true;
+  }
+};
+const writeStayLoggedIn = (stay) => {
+  try {
+    window.localStorage.setItem(STAY_KEY, stay ? "1" : "0");
+  } catch (e) {
+    /* storage unavailable */
+  }
+};
+const authStorage = {
+  getItem: (key) => {
+    try {
+      return (readStayLoggedIn() ? window.localStorage : window.sessionStorage).getItem(key);
+    } catch (e) {
+      return null;
+    }
+  },
+  setItem: (key, value) => {
+    try {
+      const keep = readStayLoggedIn();
+      (keep ? window.localStorage : window.sessionStorage).setItem(key, value);
+      (keep ? window.sessionStorage : window.localStorage).removeItem(key); // never leave a copy in the other store
+    } catch (e) {
+      /* storage unavailable */
+    }
+  },
+  removeItem: (key) => {
+    try {
+      window.localStorage.removeItem(key);
+      window.sessionStorage.removeItem(key);
+    } catch (e) {
+      /* storage unavailable */
+    }
+  },
+};
+const supabase =
+  SUPABASE_URL && SUPABASE_ANON_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { storage: authStorage, persistSession: true } })
+    : null;
 const CLOUD_ENABLED = !!supabase;
 
 // Public address of the app (verification / password-reset emails send people
@@ -7237,7 +7286,8 @@ function useAuth() {
 
   // Password login. Besides the credentials it checks the courier approval
   // status: an unapproved courier is signed straight back out.
-  const signIn = async (email, password) => {
+  const signIn = async (email, password, stay = true) => {
+    writeStayLoggedIn(stay); // choose the session store BEFORE the token is written
     const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
     if (error) return error.message;
     const { data: p } = await supabase
@@ -7333,9 +7383,11 @@ function useAuth() {
       /* the local cleanup below still runs */
     }
     try {
-      Object.keys(window.localStorage)
-        .filter((k) => /^sb-.+-auth-token/.test(k))
-        .forEach((k) => window.localStorage.removeItem(k));
+      [window.localStorage, window.sessionStorage].forEach((store) =>
+        Object.keys(store)
+          .filter((k) => /^sb-.+-auth-token/.test(k))
+          .forEach((k) => store.removeItem(k))
+      );
       window.sessionStorage.removeItem("pendingAssign");
     } catch (e) {
       /* storage unavailable */
@@ -7768,6 +7820,7 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
   const [sent, setSent] = useState({ kind: "lawyer", email: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [stay, setStay] = useState(readStayLoggedIn);
 
   const goto = (next) => {
     setMode(next);
@@ -7783,7 +7836,7 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
     setBusy(true);
     setError("");
     if (onClearNotice) onClearNotice();
-    const err = await onSignIn(login.email, login.password);
+    const err = await onSignIn(login.email, login.password, stay);
     if (err) setError(friendlyAuthError(err));
     setBusy(false);
   };
@@ -7930,6 +7983,15 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
                     required
                   />
                 </Field>
+                <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={stay}
+                    onChange={(e) => setStay(e.target.checked)}
+                    className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  הישאר מחובר
+                </label>
               </div>
               {errorBox}
               {submitBtn("התחברות")}
