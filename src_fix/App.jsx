@@ -6571,11 +6571,12 @@ const URL_AUTH_INTENT = (() => {
 // The choice itself is a harmless flag in localStorage. The adapter below is
 // consulted on every read/write, so flipping the flag at login switches the store.
 const STAY_KEY = "mesirot-stay-logged-in";
+// Default = session only. localStorage is used ONLY after "הישאר מחובר" was ticked.
 const readStayLoggedIn = () => {
   try {
-    return window.localStorage.getItem(STAY_KEY) !== "0";
+    return window.localStorage.getItem(STAY_KEY) === "1";
   } catch (e) {
-    return true;
+    return false;
   }
 };
 const writeStayLoggedIn = (stay) => {
@@ -6611,6 +6612,17 @@ const authStorage = {
     }
   },
 };
+// Tokens left in localStorage by older versions (which persisted every login)
+// must not keep anyone signed in unless they explicitly chose to stay.
+if (!readStayLoggedIn()) {
+  try {
+    Object.keys(window.localStorage)
+      .filter((k) => /^sb-.+-auth-token/.test(k))
+      .forEach((k) => window.localStorage.removeItem(k));
+  } catch (e) {
+    /* storage unavailable */
+  }
+}
 const supabase =
   SUPABASE_URL && SUPABASE_ANON_KEY
     ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { storage: authStorage, persistSession: true } })
@@ -7286,7 +7298,7 @@ function useAuth() {
 
   // Password login. Besides the credentials it checks the courier approval
   // status: an unapproved courier is signed straight back out.
-  const signIn = async (email, password, stay = true) => {
+  const signIn = async (email, password, stay = false) => {
     writeStayLoggedIn(stay); // choose the session store BEFORE the token is written
     const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
     if (error) return error.message;
@@ -7820,7 +7832,7 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
   const [sent, setSent] = useState({ kind: "lawyer", email: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [stay, setStay] = useState(readStayLoggedIn);
+  const [stay, setStay] = useState(false); // unticked by default: session-only
 
   const goto = (next) => {
     setMode(next);
