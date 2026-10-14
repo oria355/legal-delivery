@@ -810,7 +810,7 @@ const ALL_COURIERS = Array.from(new window.Set(COURIERS.map((c) => c.name)));
 // the full roster if a city/region ever has no local courier, so dispatch
 // never comes up empty.
 function couriersForCity(city, roster = COURIERS) {
-  roster = roster.filter((c) => c.approvalStatus !== "pending");
+  roster = roster.filter((c) => c.approvalStatus !== "pending" && !c.blocked);
   const region = CITY_REGION[city];
   const local = roster.filter((c) => c.region === region).map((c) => c.name);
   return local.length ? local : roster.map((c) => c.name);
@@ -821,8 +821,8 @@ function couriersForCity(city, roster = COURIERS) {
 // (prioritized) while still letting the Admin reach any courier if needed —
 // filtering down to a dead end would be worse than just sorting well.
 function groupCouriersByRegion(city, roster = COURIERS) {
-  // Couriers still waiting for approval can't be dispatched to.
-  roster = roster.filter((c) => c.approvalStatus !== "pending");
+  // Couriers still waiting for approval, or blocked by the admin, can't be dispatched to.
+  roster = roster.filter((c) => c.approvalStatus !== "pending" && !c.blocked);
   const region = CITY_REGION[city];
   const local = roster.filter((c) => c.region === region).map((c) => c.name);
   const other = roster.filter((c) => c.region !== region).map((c) => c.name);
@@ -850,7 +850,7 @@ function isOpenForPickup(o) {
 // Geo-targeting: the courier's work region must match the order's region and,
 // if the courier limited themselves to specific cities, the city must be one.
 function courierCoversOrder(c, o) {
-  if (!c || c.approvalStatus === "pending") return false;
+  if (!c || c.approvalStatus === "pending" || c.blocked) return false;
   const region = orderRegion(o);
   if (!region || c.region !== region) return false;
   return !(c.workCities && c.workCities.length) || c.workCities.includes(o.city);
@@ -4133,11 +4133,14 @@ function DispatchResponses({ order, responses, couriers, onAssign }) {
           {takers.map((r) => {
             const name = nameOf(r.courierId);
             const chosen = order.assignedCourier === name;
+            const isBlocked = !!(couriers.find((c) => c.id === r.courierId) || {}).blocked;
             return (
               <div key={r.courierId} className="flex items-center justify-between gap-1 py-0.5">
                 <span className="truncate font-medium text-slate-700">{name}</span>
                 {chosen ? (
                   <span className="flex items-center gap-0.5 text-emerald-700"><Check className="h-3 w-3" /> שובץ</span>
+                ) : isBlocked ? (
+                  <span className="text-rose-600">מושבת</span>
                 ) : (
                   canAssign && (
                     <button
@@ -5895,7 +5898,7 @@ function CourierRegistrationModal({ open, onClose, onSubmit }) {
 // details, region, license, business type, and live stats (how many orders
 // are currently assigned to them vs. how many they've completed), pulled
 // straight from the current `orders` list so the numbers are always fresh.
-function CourierDirectory({ couriers, orders, onRegisterCourier, onApproveCourier }) {
+function CourierDirectory({ couriers, orders, onRegisterCourier, onApproveCourier, onSetBlocked }) {
   const [showForm, setShowForm] = useState(false);
 
   const statsByName = useMemo(() => {
@@ -5986,9 +5989,30 @@ function CourierDirectory({ couriers, orders, onRegisterCourier, onApproveCourie
                         )}
                       </div>
                     ) : (
-                      <span className={`${PILL} bg-emerald-50 text-emerald-700 ring-emerald-200`}>
-                        <BadgeCheck className="h-2.5 w-2.5" /> פעיל
-                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {c.blocked ? (
+                          <span className={`${PILL} bg-rose-50 text-rose-700 ring-rose-200`}>
+                            <Lock className="h-2.5 w-2.5" /> מושבת
+                          </span>
+                        ) : (
+                          <span className={`${PILL} bg-emerald-50 text-emerald-700 ring-emerald-200`}>
+                            <BadgeCheck className="h-2.5 w-2.5" /> פעיל
+                          </span>
+                        )}
+                        {onSetBlocked && (
+                          <button
+                            type="button"
+                            onClick={() => onSetBlocked(c, !c.blocked)}
+                            className={`rounded-md px-2 py-0.5 text-[11px] font-semibold ${
+                              c.blocked
+                                ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                                : "border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                            }`}
+                          >
+                            {c.blocked ? "החזר לפעילות" : "חסום מפעילות"}
+                          </button>
+                        )}
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -6110,6 +6134,11 @@ function AdminDashboard({
   couriers,
   onRegisterCourier,
   onApproveCourier,
+  onSetBlocked,
+  assignOrderId = "",
+  onCloseAssign,
+  notifyPermission = "unsupported",
+  onEnableNotify,
   onSignAffidavit,
 }) {
   const [dashTab, setDashTab] = useState(() => (window.location.hash === "#couriers" ? "couriers" : "overview"));
@@ -6118,6 +6147,18 @@ function AdminDashboard({
   const [detailsId, setDetailsId] = useState(null);
   const [pricingOrder, setPricingOrder] = useState(null);
   const [marginOrderId, setMarginOrderId] = useState(null);
+
+  // Deep link from the notification: show the overview, then scroll to the order.
+  useEffect(() => {
+    if (!assignOrderId) return undefined;
+    setDashTab("overview");
+    setActiveFilter(null);
+    const t = setTimeout(() => {
+      const el = window.document.getElementById(`order-row-${assignOrderId}`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 200);
+    return () => clearTimeout(t);
+  }, [assignOrderId, orders.length]);
 
   const pendingRequestsCount = useMemo(
     () => orders.reduce((sum, o) => sum + (o.priceRequests || []).filter((r) => r.status === "pending").length, 0),
@@ -6232,6 +6273,7 @@ function AdminDashboard({
           orders={orders}
           onRegisterCourier={onRegisterCourier}
           onApproveCourier={onApproveCourier}
+          onSetBlocked={onSetBlocked}
         />
       )}
 
@@ -6245,6 +6287,25 @@ function AdminDashboard({
 
       {dashTab === "overview" && (
         <>
+      {assignOrderId && (
+        <AssignBanner
+          order={orders.find((o) => o.id === assignOrderId) || null}
+          orderId={assignOrderId}
+          couriers={couriers}
+          responses={responses}
+          onAssign={onAssignCourier}
+          onClose={onCloseAssign}
+        />
+      )}
+      {notifyPermission === "default" && onEnableNotify && (
+        <button
+          type="button"
+          onClick={onEnableNotify}
+          className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700"
+        >
+          <Bell className="h-4 w-4" /> הפעלת התראות על מסירות חדשות בנייד
+        </button>
+      )}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         {cards.map((c) => (
           <StatCard
@@ -6307,7 +6368,11 @@ function AdminDashboard({
                   </thead>
                   <tbody>
                     {cityOrders.map((o) => (
-                      <tr key={o.id} className="border-t border-slate-100">
+                      <tr
+                        key={o.id}
+                        id={`order-row-${o.id}`}
+                        className={`border-t border-slate-100 ${assignOrderId === o.id ? "bg-orange-50 ring-2 ring-inset ring-orange-300" : ""}`}
+                      >
                         <td className="px-3 py-2.5 font-medium text-slate-700">{o.id}</td>
                         <td className="px-3 py-2.5 text-slate-600">{o.recipientName}</td>
                         <td className="px-3 py-2.5 text-slate-500">
@@ -6351,8 +6416,12 @@ function AdminDashboard({
                                     {declined.has(c) ? " — דחה" : ""}
                                   </option>
                                 );
+                                const cur = o.assignedCourier;
                                 return (
                                   <>
+                                    {cur && !local.includes(cur) && !other.includes(cur) && (
+                                      <option value={cur}>{cur} — מושבת</option>
+                                    )}
                                     <optgroup label={`באזור ${region || ""} (מומלץ)`}>{local.map(opt)}</optgroup>
                                     {other.length > 0 && <optgroup label="שליחים מאזורים אחרים">{other.map(opt)}</optgroup>}
                                   </>
@@ -6502,10 +6571,170 @@ const CLOUD_ENABLED = !!supabase;
 // Public address of the app (verification / password-reset emails send people
 // back here). Set VITE_SITE_URL=https://mesirot.express in production; it falls
 // back to whatever origin the app is running on (localhost, preview URLs).
+// Deep link "#assign=<ORDER_ID>" (opened from the new-order notification).
+// Captured at load and kept in sessionStorage so it survives the login screen.
+const ASSIGN_INTENT = (() => {
+  try {
+    const m = /[#&]assign=([^&]+)/.exec(window.location.hash);
+    if (m) {
+      const id = decodeURIComponent(m[1]);
+      window.sessionStorage.setItem("pendingAssign", id);
+      return id;
+    }
+    return window.sessionStorage.getItem("pendingAssign") || "";
+  } catch (e) {
+    return "";
+  }
+})();
+
 const SITE_URL = (
   import.meta.env.VITE_SITE_URL ||
   (/^(localhost|127\.)/.test(window.location.hostname) ? window.location.origin : "https://mesirot.express")
 ).replace(/\/+$/, "");
+
+/* -------------------------------------------------------------------------
+   ADMIN NEW-ORDER NOTIFICATIONS — a native banner (via the Service Worker in
+   public/sw.js) with vibration and the system sound. It fires when a new
+   order shows up in the live order list (Supabase Realtime keeps that list
+   current). Tapping it opens "#assign=<ORDER_ID>".
+   NOTE: this runs inside the open app / PWA (foreground or background). A
+   banner while the app is fully closed needs server-side Web Push.
+   ------------------------------------------------------------------------- */
+const NOTIFY_SUPPORTED = () => typeof window.Notification !== "undefined" && !!window.navigator.serviceWorker;
+
+async function registerServiceWorker() {
+  try {
+    await window.navigator.serviceWorker.register("/sw.js");
+    return await window.navigator.serviceWorker.ready;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function showNewOrderNotification(order) {
+  const reg = await registerServiceWorker();
+  if (!reg) return;
+  const where = [order.city, `${order.street || ""} ${order.houseNumber || ""}`.trim()].filter(Boolean).join(", ");
+  reg.showNotification("מסירה חדשה (אבא תודה)", {
+    body: `${order.submittedBy ? order.submittedBy + " ← " : ""}${order.recipientName || ""} · ${where}\n${order.id}`,
+    tag: `new-order-${order.id}`,
+    dir: "rtl",
+    lang: "he",
+    vibrate: [200, 100, 200],
+    icon: "/icon-192.png",
+    badge: "/icon-192.png",
+    data: { orderId: order.id, url: `${SITE_URL}/#assign=${order.id}` },
+  });
+}
+
+function useAdminOrderAlerts({ enabled, ready, orders, onOpenOrder }) {
+  const [permission, setPermission] = useState(() => (NOTIFY_SUPPORTED() ? window.Notification.permission : "unsupported"));
+  const seenRef = useRef(null);
+  const openRef = useRef(onOpenOrder);
+  openRef.current = onOpenOrder;
+
+  // Register the worker and listen for "notification tapped" messages.
+  useEffect(() => {
+    if (!enabled || !NOTIFY_SUPPORTED()) return undefined;
+    registerServiceWorker();
+    const onMessage = (e) => {
+      if (e.data && e.data.type === "assign" && e.data.orderId) openRef.current(e.data.orderId);
+    };
+    window.navigator.serviceWorker.addEventListener("message", onMessage);
+    return () => window.navigator.serviceWorker.removeEventListener("message", onMessage);
+  }, [enabled]);
+
+  // New order = an id we have not seen since the first load.
+  useEffect(() => {
+    if (!ready) return;
+    if (seenRef.current === null) {
+      seenRef.current = new window.Set(orders.map((o) => o.id));
+      return;
+    }
+    const fresh = orders.filter((o) => !seenRef.current.has(o.id));
+    fresh.forEach((o) => seenRef.current.add(o.id));
+    if (!enabled || permission !== "granted") return;
+    fresh.filter((o) => o.status === STATUS.PENDING).forEach(showNewOrderNotification);
+  }, [orders, ready, enabled, permission]);
+
+  const requestPermission = async () => {
+    try {
+      setPermission(await window.Notification.requestPermission());
+    } catch (e) {
+      setPermission("denied");
+    }
+  };
+  return { permission, requestPermission };
+}
+
+// Orange one-tap assignment banner — opened by the #assign=<ORDER_ID> link.
+function AssignBanner({ order, orderId, couriers, responses, onAssign, onClose }) {
+  const [pick, setPick] = useState("");
+  const roster = couriers || COURIERS;
+  const shell = (children) => (
+    <div className="rounded-2xl border border-orange-300 bg-orange-50 p-4 shadow-sm">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <p className="flex items-center gap-1.5 text-sm font-extrabold text-orange-700">
+          <Bell className="h-4 w-4" /> מסירה חדשה ממתינה לשיבוץ — {orderId}
+        </p>
+        <button type="button" onClick={onClose} aria-label="סגירה" className="text-orange-500 hover:text-orange-700">
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+      {children}
+    </div>
+  );
+  if (!order) return shell(<p className="text-xs text-orange-700">טוען את ההזמנה…</p>);
+  if (order.assignedCourier || isAssignmentLocked(order)) {
+    return shell(
+      <p className="flex items-center gap-1.5 text-sm font-semibold text-emerald-700">
+        <Check className="h-4 w-4" /> {order.assignedCourier ? `שובץ: ${order.assignedCourier}` : `סטטוס: ${order.status}`}
+      </p>
+    );
+  }
+  // Blocked / pending couriers are already filtered out by groupCouriersByRegion;
+  // couriers who declined this order are removed here.
+  const declined = declinedNamesFor(order.id, responses, roster);
+  const { region, local, other } = groupCouriersByRegion(order.city, roster);
+  const takers = responses
+    .filter((r) => r.orderId === order.id && r.action === RESPONSE.TAKE)
+    .map((r) => (roster.find((c) => c.id === r.courierId) || {}).name)
+    .filter((n) => n && [...local, ...other].includes(n));
+  const opts = (list) => list.filter((n) => !declined.has(n)).map((n) => <option key={n} value={n}>{n}</option>);
+  return shell(
+    <>
+      <p className="text-xs text-orange-800">
+        {order.recipientName} · {order.street} {order.houseNumber}, {order.city}
+        {order.submittedBy ? ` · ${order.submittedBy}` : ""}
+      </p>
+      {takers.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+          <span className="font-semibold text-orange-700">ביקשו את המשימה:</span>
+          {takers.map((n) => (
+            <button key={n} type="button" onClick={() => onAssign(order.id, n)} className="rounded-md bg-emerald-600 px-2 py-0.5 font-semibold text-white hover:bg-emerald-700">
+              שבץ את {n}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="mt-3 flex gap-2">
+        <select value={pick} onChange={(e) => setPick(e.target.value)} className="min-w-0 flex-1 rounded-lg border border-orange-300 bg-white px-2 py-2 text-sm text-slate-700 focus:outline-none">
+          <option value="">בחרו שליח…</option>
+          <optgroup label={`באזור ${region || ""} (מומלץ)`}>{opts(local)}</optgroup>
+          {other.length > 0 && <optgroup label="שליחים מאזורים אחרים">{opts(other)}</optgroup>}
+        </select>
+        <button
+          type="button"
+          disabled={!pick}
+          onClick={() => onAssign(order.id, pick)}
+          className="rounded-lg bg-orange-500 px-4 py-2 text-sm font-bold text-white hover:bg-orange-600 disabled:opacity-50"
+        >
+          שבץ שליח
+        </button>
+      </div>
+    </>
+  );
+}
 
 // Exposes the signed-in profile (or null in demo mode) to nested screens.
 const SessionContext = React.createContext(null);
@@ -6644,6 +6873,7 @@ function courierFromProfile(p) {
     licenseNumber: p.license_number || "",
     businessType: p.business_type || "",
     approvalStatus: p.approval_status || "approved",
+    blocked: !!p.blocked,
     // Optional: limit pickup alerts to these cities (empty = the whole region).
     workCities: Array.isArray(p.work_cities) ? p.work_cities : [],
   };
@@ -6841,6 +7071,35 @@ async function notifyAdminOfCourier(c) {
   }
 }
 
+// Admin blocked / restored a user: tell Make (same webhook as the courier
+// sign-up). Make can route on `event` and e-mail both the admin
+// (`notify_email`) and the user (`email`). Fire-and-forget like the others.
+async function notifyUserBlockChange(c, blocked) {
+  if (!/^https:\/\//i.test(COURIER_WEBHOOK_URL)) {
+    console.warn("Courier webhook skipped: set COURIER_WEBHOOK_URL (or VITE_COURIER_WEBHOOK_URL).");
+    return false;
+  }
+  try {
+    const state = blocked ? "הושבת מפעילות על ידי המנהל" : "הוחזר לפעילות על ידי המנהל";
+    const body = new window.URLSearchParams({
+      event: blocked ? "user_blocked" : "user_restored",
+      notify_email: ADMIN_NOTIFY_EMAIL,
+      email: c.email || "",
+      full_name: c.name || "",
+      user_id: String(c.id || ""),
+      blocked: blocked ? "yes" : "no",
+      changed_at: new window.Date().toISOString(),
+      subject: `${blocked ? "חשבון הושבת" : "חשבון הוחזר לפעילות"}: ${c.name || c.email}`,
+      message: `החשבון של ${c.name || ""} (${c.email || ""}) ${state}.`,
+    });
+    await window.fetch(COURIER_WEBHOOK_URL, { method: "POST", mode: "no-cors", body, keepalive: true });
+    return true;
+  } catch (e) {
+    console.warn("Block/restore webhook failed (the change itself was saved):", e);
+    return false;
+  }
+}
+
 // Supabase session + the matching profile row (which carries the role).
 // Two registration paths, each with its own metadata payload; the database
 // trigger `handle_new_user` turns that metadata into the right profile:
@@ -6902,6 +7161,14 @@ function useAuth() {
           // A courier may not enter until the admin approves — not even right
           // after verifying the e-mail (that link creates a live session).
           // Drop the session at once and explain on the login screen.
+          if (data.blocked) {
+            setAuthNotice("blocked");
+            verifiedRef.current = false;
+            setProfile(null);
+            setLoading(false);
+            await supabase.auth.signOut();
+            return;
+          }
           if (data.role === "courier" && data.approval_status === "pending") {
             setAuthNotice(verifiedRef.current ? "verified" : "pending");
             verifiedRef.current = false;
@@ -6927,6 +7194,40 @@ function useAuth() {
     };
   }, [userId]);
 
+  // A user blocked WHILE signed in is signed out immediately: Realtime pushes
+  // the profile change, and we re-check whenever the tab becomes visible again.
+  const hasProfile = !!profile;
+  useEffect(() => {
+    if (!supabase || !userId || !hasProfile) return undefined;
+    const kick = () => {
+      setAuthNotice("blocked");
+      setProfile(null);
+      supabase.auth.signOut();
+    };
+    const check = async () => {
+      const { data } = await supabase.from("profiles").select("blocked").eq("auth_id", userId).maybeSingle();
+      if (data && data.blocked) kick();
+    };
+    const channel = supabase
+      .channel(`self-${userId}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "profiles", filter: `auth_id=eq.${userId}` },
+        (payload) => {
+          if (payload.new && payload.new.blocked) kick();
+        }
+      )
+      .subscribe();
+    const onVisible = () => {
+      if (window.document.visibilityState === "visible") check();
+    };
+    window.document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      supabase.removeChannel(channel);
+      window.document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [userId, hasProfile]);
+
   // Re-reads the profile (used by a courier waiting for admin approval).
   const refreshProfile = async () => {
     if (!supabase || !userId) return;
@@ -6941,9 +7242,13 @@ function useAuth() {
     if (error) return error.message;
     const { data: p } = await supabase
       .from("profiles")
-      .select("role, approval_status")
+      .select("role, approval_status, blocked")
       .eq("auth_id", data.user.id)
       .maybeSingle();
+    if (p && p.blocked) {
+      await supabase.auth.signOut();
+      return BLOCKED_MSG;
+    }
     if (p && p.role === "courier" && p.approval_status === "pending") {
       await supabase.auth.signOut();
       return COURIER_PENDING_MSG;
@@ -7155,6 +7460,14 @@ function useCloudStore(profile, setters) {
       return true;
     };
 
+    // Admin: block / restore a user. The SQL function updates the row by id AND
+    // by e-mail (so a pre-registered twin of the same address is covered).
+    const setUserBlocked = async (userId, blocked) => {
+      const { error: e } = await supabase.rpc("set_user_blocked", { p_user_id: userId, p_blocked: blocked });
+      if (e) setError(e.message || String(e));
+      refreshCouriers();
+    };
+
     // Next clean order number (ORD-1001 …) from the database sequence.
     const nextOrderId = async () => {
       const { data, error: e } = await supabase.rpc("next_order_id");
@@ -7270,6 +7583,7 @@ function useCloudStore(profile, setters) {
       refreshSettings,
       persistOrders,
       cancelOrder,
+      setUserBlocked,
       nextOrderId,
       refreshResponses,
       respondToOrder,
@@ -7392,6 +7706,7 @@ function FullScreenLoader({ text = "טוען..." }) {
   );
 }
 
+const BLOCKED_MSG = "החשבון הושבת מפעילות על ידי המנהל";
 const COURIER_PENDING_MSG = "החשבון ממתין לאישור מנהל. תוכלו להתחבר לאחר שהבקשה תאושר.";
 
 // Turns raw Supabase auth errors into Hebrew messages.
@@ -7555,6 +7870,11 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
               <CheckCircle2 className="h-5 w-5" /> האימות בוצע בהצלחה
             </p>
             <p className="mt-1 text-xs font-medium text-green-700">החשבון ממתין לאישור מנהל</p>
+          </div>
+        )}
+        {mode === "in" && notice === "blocked" && !error && (
+          <div role="alert" className="mb-4 rounded-xl bg-rose-50 px-4 py-3 text-center text-sm font-semibold text-rose-700 ring-1 ring-inset ring-rose-200">
+            {BLOCKED_MSG}
           </div>
         )}
         {mode === "in" && notice === "pending" && !error && (
@@ -7973,6 +8293,7 @@ function AppShell({ profile, onSignOut }) {
   const persistOrders = cloud.persistOrders;
   const cloudCancelOrder = cloud.cancelOrder;
   const cloudNextOrderId = cloud.nextOrderId;
+  const cloudSetUserBlocked = cloud.setUserBlocked;
   const cloudRespond = cloud.respondToOrder;
   const cloudAcknowledge = cloud.acknowledgeResponse;
 
@@ -8187,6 +8508,41 @@ function AppShell({ profile, onSignOut }) {
     );
   }, []);
 
+  // --- "#assign=<ORDER_ID>" deep link + admin new-order notifications -------
+  const [assignOrderId, setAssignOrderId] = useState(ASSIGN_INTENT);
+  const openAssign = useCallback((id) => {
+    try {
+      window.sessionStorage.setItem("pendingAssign", id);
+    } catch (e) {
+      /* storage unavailable — the in-memory state is enough */
+    }
+    setAssignOrderId(id);
+    if (!cloudOn) setView("admin");
+  }, [cloudOn]);
+  const closeAssign = useCallback(() => {
+    try {
+      window.sessionStorage.removeItem("pendingAssign");
+    } catch (e) {
+      /* ignore */
+    }
+    setAssignOrderId("");
+    if (/assign=/.test(window.location.hash)) window.history.replaceState(null, "", window.location.pathname);
+  }, []);
+  useEffect(() => {
+    const onHash = () => {
+      const m = /[#&]assign=([^&]+)/.exec(window.location.hash);
+      if (m) openAssign(decodeURIComponent(m[1]));
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, [openAssign]);
+  const alerts = useAdminOrderAlerts({
+    enabled: view === "admin",
+    ready: !cloudOn || cloud.ready,
+    orders,
+    onOpenOrder: openAssign,
+  });
+
   // Courier answers an open order. Re-checks that it is still open.
   const handleRespond = useCallback(
     (orderId, courierId, action) => {
@@ -8210,11 +8566,25 @@ function AppShell({ profile, onSignOut }) {
     [cloudOn, cloudAcknowledge]
   );
 
+  // Admin: block / restore a user ("חסום מפעילות" / "החזר לפעילות").
+  const handleSetBlocked = useCallback(
+    (c, blocked) => {
+      const email = (c.email || "").toLowerCase();
+      setCouriers((prev) =>
+        prev.map((x) => (x.id === c.id || (email && (x.email || "").toLowerCase() === email) ? { ...x, blocked } : x))
+      );
+      if (cloudOn) cloudSetUserBlocked(c.id, blocked);
+      notifyUserBlockChange(c, blocked);
+    },
+    [cloudOn, cloudSetUserBlocked]
+  );
+
   const handleAssignCourier = useCallback(
     (id, courier) => {
       // The courier's id (for Row Level Security) and a snapshot of the
       // details the affidavit needs travel with the order.
       const c = couriers.find((x) => x.name === courier);
+      if (c && c.blocked) return; // blocked couriers can't be assigned
       const target = ordersRef.current.find((o) => o.id === id);
       // Resolve the pickup requests: chosen courier selected, the rest "taken".
       if (c && target && !isAssignmentLocked(target)) {
@@ -8398,6 +8768,11 @@ function AppShell({ profile, onSignOut }) {
           couriers={couriers}
           onRegisterCourier={handleRegisterCourier}
           onApproveCourier={cloud.approveCourier}
+          onSetBlocked={handleSetBlocked}
+          assignOrderId={assignOrderId}
+          onCloseAssign={closeAssign}
+          notifyPermission={alerts.permission}
+          onEnableNotify={alerts.requestPermission}
           onSignAffidavit={handleAdminSignAffidavit}
         />
       )}
