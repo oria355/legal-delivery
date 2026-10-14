@@ -6112,7 +6112,7 @@ function AdminDashboard({
   onApproveCourier,
   onSignAffidavit,
 }) {
-  const [dashTab, setDashTab] = useState("overview");
+  const [dashTab, setDashTab] = useState(() => (window.location.hash === "#couriers" ? "couriers" : "overview"));
   const [activeFilter, setActiveFilter] = useState(null);
   const [affidavitOrder, setAffidavitOrder] = useState(null);
   const [detailsId, setDetailsId] = useState(null);
@@ -6488,13 +6488,24 @@ function AdminDashboard({
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "";
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 const EVIDENCE_BUCKET = "evidence";
+// What the address bar said when the page opened — read BEFORE createClient,
+// because supabase-js removes the auth tokens from the URL right after parsing.
+//   #...type=signup     -> the user just clicked the e-mail verification link
+//   #...type=recovery   -> the user just clicked the password-reset link
+const URL_AUTH_INTENT = (() => {
+  const raw = window.location.hash + "&" + window.location.search;
+  return { verified: /type=(signup|email)\b/.test(raw), recovery: /type=recovery\b/.test(raw) };
+})();
 const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 const CLOUD_ENABLED = !!supabase;
 
 // Public address of the app (verification / password-reset emails send people
 // back here). Set VITE_SITE_URL=https://mesirot.express in production; it falls
 // back to whatever origin the app is running on (localhost, preview URLs).
-const SITE_URL = (import.meta.env.VITE_SITE_URL || window.location.origin).replace(/\/+$/, "");
+const SITE_URL = (
+  import.meta.env.VITE_SITE_URL ||
+  (/^(localhost|127\.)/.test(window.location.hostname) ? window.location.origin : "https://mesirot.express")
+).replace(/\/+$/, "");
 
 // Exposes the signed-in profile (or null in demo mode) to nested screens.
 const SessionContext = React.createContext(null);
@@ -6718,7 +6729,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const COURIER_WEBHOOK_URL = import.meta.env.VITE_COURIER_WEBHOOK_URL || "PASTE_YOUR_WEBHOOK_URL_HERE";
 // Recipient of the "new courier" admin email — your scenario's email module
 // can map this field (`notify_email`) or you can hard-code the address there.
-const ADMIN_NOTIFY_EMAIL = "oria355@gmail.com";
+const ADMIN_NOTIFY_EMAIL = "mesirot.express@gmail.com";
 
 // ---------------------------------------------------------------------------
 // NEW ORDER WEBHOOK (Make.com) — SMS & e-mail alerts
@@ -6805,6 +6816,7 @@ async function notifyAdminOfCourier(c) {
       `אזור עבודה: ${c.region}`,
       `מספר רישיון: ${c.licenseNumber}`,
       `סוג עוסק: ${c.businessType}`,
+      `לאישור הבקשה: ${SITE_URL}/#couriers (התחברו כמנהל ← שליחים ← אישור)`,
     ].join("\n");
     const body = new window.URLSearchParams({
       event: "courier_registration",
@@ -6817,6 +6829,7 @@ async function notifyAdminOfCourier(c) {
       region: c.region,
       license_number: c.licenseNumber,
       business_type: c.businessType,
+      approval_link: `${SITE_URL}/#couriers`,
       subject: `בקשת הצטרפות שליח חדש: ${c.fullName}`,
       message: summary,
     });
@@ -6839,7 +6852,11 @@ function useAuth() {
   const [loading, setLoading] = useState(CLOUD_ENABLED);
   const [profileError, setProfileError] = useState("");
   // True while the user arrived from a password-reset email and must choose a new password.
-  const [recovery, setRecovery] = useState(() => /type=recovery/.test(window.location.hash + window.location.search));
+  const [recovery, setRecovery] = useState(URL_AUTH_INTENT.recovery);
+  // "verified" = just verified the e-mail (green banner); "pending" = an unapproved
+  // courier tried to get in. Both are shown on the login screen.
+  const [authNotice, setAuthNotice] = useState("");
+  const verifiedRef = useRef(URL_AUTH_INTENT.verified);
   const userId = session && session.user ? session.user.id : null;
 
   useEffect(() => {
@@ -6882,6 +6899,18 @@ function useAuth() {
           break;
         }
         if (data) {
+          // A courier may not enter until the admin approves — not even right
+          // after verifying the e-mail (that link creates a live session).
+          // Drop the session at once and explain on the login screen.
+          if (data.role === "courier" && data.approval_status === "pending") {
+            setAuthNotice(verifiedRef.current ? "verified" : "pending");
+            verifiedRef.current = false;
+            setProfile(null);
+            setLoading(false);
+            await supabase.auth.signOut();
+            return;
+          }
+          verifiedRef.current = false;
           setProfile(data);
           setLoading(false);
           return;
@@ -6905,9 +6934,21 @@ function useAuth() {
     if (data) setProfile(data);
   };
 
+  // Password login. Besides the credentials it checks the courier approval
+  // status: an unapproved courier is signed straight back out.
   const signIn = async (email, password) => {
-    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
-    return error ? error.message : "";
+    const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    if (error) return error.message;
+    const { data: p } = await supabase
+      .from("profiles")
+      .select("role, approval_status")
+      .eq("auth_id", data.user.id)
+      .maybeSingle();
+    if (p && p.role === "courier" && p.approval_status === "pending") {
+      await supabase.auth.signOut();
+      return COURIER_PENDING_MSG;
+    }
+    return "";
   };
 
   // Shared sign-up call. `metadata` is the role-specific payload.
@@ -6975,7 +7016,7 @@ function useAuth() {
 
   const signOut = () => supabase.auth.signOut();
 
-  return { loading, profile, profileError, recovery, requestPasswordReset, updatePassword, signIn, signUpLawyer, signUpCourier, refreshProfile, signOut };
+  return { loading, profile, profileError, authNotice, clearAuthNotice: () => setAuthNotice(""), recovery, requestPasswordReset, updatePassword, signIn, signUpLawyer, signUpCourier, refreshProfile, signOut };
 }
 
 // Loads everything the signed-in role is allowed to see, keeps it live via
@@ -7351,6 +7392,8 @@ function FullScreenLoader({ text = "טוען..." }) {
   );
 }
 
+const COURIER_PENDING_MSG = "החשבון ממתין לאישור מנהל. תוכלו להתחבר לאחר שהבקשה תאושר.";
+
 // Turns raw Supabase auth errors into Hebrew messages.
 function friendlyAuthError(msg) {
   if (/invalid login/i.test(msg)) return "אימייל או סיסמה שגויים";
@@ -7380,7 +7423,7 @@ const EMPTY_COURIER_FORM = {
 //   mode "lawyer"  law firm / company: name, email, password
 //   mode "courier" courier join request: name, phone, city, region, license, business type
 //   mode "sent"    "check your inbox to verify your email" confirmation
-function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPassword, profileError }) {
+function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPassword, profileError, notice = "", onClearNotice }) {
   const [mode, setMode] = useState("in");
   const [login, setLogin] = useState({ email: "", password: "" });
   const [lawyer, setLawyer] = useState(EMPTY_LAWYER_FORM);
@@ -7402,6 +7445,7 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
     e.preventDefault();
     setBusy(true);
     setError("");
+    if (onClearNotice) onClearNotice();
     const err = await onSignIn(login.email, login.password);
     if (err) setError(friendlyAuthError(err));
     setBusy(false);
@@ -7505,6 +7549,19 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
         </div>
 
         {/* ---------------- Sign in + the two registration entry points ---------------- */}
+        {mode === "in" && notice === "verified" && (
+          <div role="status" className="mb-4 rounded-xl bg-green-50 px-4 py-3 text-center ring-1 ring-inset ring-green-300">
+            <p className="flex items-center justify-center gap-2 text-base font-extrabold text-green-700">
+              <CheckCircle2 className="h-5 w-5" /> האימות בוצע בהצלחה
+            </p>
+            <p className="mt-1 text-xs font-medium text-green-700">החשבון ממתין לאישור מנהל</p>
+          </div>
+        )}
+        {mode === "in" && notice === "pending" && !error && (
+          <div role="status" className="mb-4 rounded-xl bg-amber-50 px-4 py-3 text-center text-xs font-medium text-amber-800 ring-1 ring-inset ring-amber-200">
+            {COURIER_PENDING_MSG}
+          </div>
+        )}
         {mode === "in" && (
           <>
             <form onSubmit={submitLogin}>
@@ -7860,6 +7917,8 @@ export default function App() {
         onSignUpLawyer={auth.signUpLawyer}
         onSignUpCourier={auth.signUpCourier}
         onResetPassword={auth.requestPasswordReset}
+        notice={auth.authNotice}
+        onClearNotice={auth.clearAuthNotice}
         profileError={auth.profileError}
       />
     );
