@@ -7319,9 +7319,31 @@ function useAuth() {
     return "";
   };
 
-  const signOut = () => supabase.auth.signOut();
+  // Secure logout: end the Supabase session, drop the in-memory profile (the
+  // whole AppShell unmounts with it), wipe any stored auth token and the deep
+  // link, and clean the address bar. Other open tabs of this browser are signed
+  // out too (supabase-js syncs the SIGNED_OUT event). Nothing in the URL can
+  // log anyone in again — a session exists only as a token in the browser.
+  const signOut = async () => {
+    setProfile(null);
+    setAuthNotice("");
+    try {
+      await supabase.auth.signOut();
+    } catch (e) {
+      /* the local cleanup below still runs */
+    }
+    try {
+      Object.keys(window.localStorage)
+        .filter((k) => /^sb-.+-auth-token/.test(k))
+        .forEach((k) => window.localStorage.removeItem(k));
+      window.sessionStorage.removeItem("pendingAssign");
+    } catch (e) {
+      /* storage unavailable */
+    }
+    window.history.replaceState(null, "", window.location.pathname);
+  };
 
-  return { loading, profile, profileError, authNotice, clearAuthNotice: () => setAuthNotice(""), recovery, requestPasswordReset, updatePassword, signIn, signUpLawyer, signUpCourier, refreshProfile, signOut };
+  return { session, loading, profile, profileError, authNotice, clearAuthNotice: () => setAuthNotice(""), recovery, requestPasswordReset, updatePassword, signIn, signUpLawyer, signUpCourier, refreshProfile, signOut };
 }
 
 // Loads everything the signed-in role is allowed to see, keeps it live via
@@ -8212,10 +8234,23 @@ function PendingApprovalScreen({ profile, onRefresh, onSignOut }) {
    ========================================================================= */
 // Public entry point: in cloud mode it gates the app behind sign-in and picks
 // the view from the user's role; without Supabase keys it runs the demo.
+// Demo mode (no Supabase, no login, all three portals open) is for local work
+// only. A production build without the Supabase keys must NOT fall back to it.
+const DEMO_ALLOWED = !!import.meta.env.DEV || import.meta.env.VITE_ALLOW_DEMO === "true";
+const KNOWN_ROLES = ["admin", "courier", "lawyer"];
+
 export default function App() {
   useHeebo();
   const auth = useAuth();
-  if (!CLOUD_ENABLED) return <AppShell profile={null} />;
+  if (!CLOUD_ENABLED) {
+    return DEMO_ALLOWED ? (
+      <AppShell profile={null} />
+    ) : (
+      <div dir="rtl" className="flex min-h-screen items-center justify-center bg-[#f8f9fa] px-4 text-center text-sm font-medium text-slate-500" style={{ fontFamily: "'Heebo', sans-serif" }}>
+        המערכת אינה מוגדרת כראוי (חסרים פרטי חיבור). פנו למנהל המערכת.
+      </div>
+    );
+  }
   if (auth.loading) return <FullScreenLoader text="מתחבר..." />;
   // Arrived from the password-reset email: choose a new password first.
   if (auth.recovery) {
@@ -8230,7 +8265,17 @@ export default function App() {
       />
     );
   }
-  if (!auth.profile) {
+  // AUTH GUARD — the portals render only for a live Supabase session whose
+  // profile belongs to that very session and has a known role. Anything else
+  // (logged out, copied link, stale profile for one frame after sign-out,
+  // unknown role) shows the login screen and nothing else.
+  const authed =
+    !!auth.session &&
+    !!auth.profile &&
+    auth.profile.auth_id === auth.session.user.id &&
+    KNOWN_ROLES.includes(auth.profile.role) &&
+    !auth.profile.blocked;
+  if (!authed) {
     return (
       <LoginScreen
         onSignIn={auth.signIn}
