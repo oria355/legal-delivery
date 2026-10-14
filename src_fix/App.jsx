@@ -6612,17 +6612,46 @@ const authStorage = {
     }
   },
 };
-// Tokens left in localStorage by older versions (which persisted every login)
-// must not keep anyone signed in unless they explicitly chose to stay.
-if (!readStayLoggedIn()) {
+// STARTUP SESSION GUARD — runs before the Supabase client exists, so no stale
+// session can ever be picked up. Unless "הישאר מחובר" was explicitly ticked:
+//   • tokens in localStorage (also those left by older versions) are deleted;
+//   • tokens in sessionStorage are deleted on every fresh visit (link click,
+//     typed address, new tab, app relaunch) — only a plain page reload (F5)
+//     keeps the current tab signed in.
+// An e-mail verification / password-reset link carries its own tokens in the
+// URL; those are untouched, so the verification flow still works.
+const AUTH_TOKEN_KEY = /^sb-.+-auth-token/;
+const wipeAuthTokens = (store) => {
   try {
-    Object.keys(window.localStorage)
-      .filter((k) => /^sb-.+-auth-token/.test(k))
-      .forEach((k) => window.localStorage.removeItem(k));
+    Object.keys(store)
+      .filter((k) => AUTH_TOKEN_KEY.test(k))
+      .forEach((k) => store.removeItem(k));
   } catch (e) {
     /* storage unavailable */
   }
-}
+};
+(() => {
+  const arrivedViaAuthLink = /access_token=|[?&]code=|type=(signup|email|recovery|magiclink|invite)\b/.test(
+    window.location.hash + window.location.search
+  );
+  if (readStayLoggedIn()) {
+    // A stale "stay" flag without a stored session must not make a later
+    // e-mail-link login permanent.
+    const hasToken = Object.keys(window.localStorage).some((k) => AUTH_TOKEN_KEY.test(k));
+    if (!hasToken && !arrivedViaAuthLink) writeStayLoggedIn(false);
+    return;
+  }
+  if (arrivedViaAuthLink) return;
+  wipeAuthTokens(window.localStorage);
+  let navType = "navigate";
+  try {
+    const entry = window.performance.getEntriesByType("navigation")[0];
+    if (entry) navType = entry.type;
+  } catch (e) {
+    /* default: treat as a fresh visit */
+  }
+  if (navType !== "reload") wipeAuthTokens(window.sessionStorage);
+})();
 const supabase =
   SUPABASE_URL && SUPABASE_ANON_KEY
     ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { storage: authStorage, persistSession: true } })
@@ -7395,11 +7424,9 @@ function useAuth() {
       /* the local cleanup below still runs */
     }
     try {
-      [window.localStorage, window.sessionStorage].forEach((store) =>
-        Object.keys(store)
-          .filter((k) => /^sb-.+-auth-token/.test(k))
-          .forEach((k) => store.removeItem(k))
-      );
+      wipeAuthTokens(window.localStorage);
+      wipeAuthTokens(window.sessionStorage);
+      writeStayLoggedIn(false); // the next login starts from the safe default
       window.sessionStorage.removeItem("pendingAssign");
     } catch (e) {
       /* storage unavailable */
