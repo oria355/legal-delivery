@@ -2680,6 +2680,94 @@ function InfoRow({ label, value, action }) {
 // shows what a lawyer submitting deliveries needs — their own new-order form
 // and a live status table. No courier rates, payroll or admin controls exist
 // anywhere in this component or the data it's handed.
+// One thumbnail that opens full size in a new tab, with a download link.
+function EvidenceThumb({ src, label, name }) {
+  if (!src || src === "SIGNED") return null;
+  return (
+    <figure className="w-24 text-center">
+      <a href={src} target="_blank" rel="noopener noreferrer" title="לחצו לצפייה בגודל מלא">
+        <img src={src} alt={label} className="h-24 w-24 rounded-lg border border-slate-200 bg-white object-cover" />
+      </a>
+      <figcaption className="mt-1 text-[11px] leading-tight text-slate-500">{label}</figcaption>
+      <a href={src} download={name} className="text-[11px] font-semibold text-indigo-600 hover:underline">
+        הורדה
+      </a>
+    </figure>
+  );
+}
+
+// "היסטוריה": one card PER delivery with every saved photo, the recipient's
+// signature and the courier's signed affidavit.
+function OrderHistoryList({ orders, onOpenAffidavit }) {
+  const rows = orders
+    .filter((o) => (o.attempts || []).length > 0 || o.status === "בוטל")
+    .slice()
+    .sort((a, b) => String(b.id).localeCompare(String(a.id), "he", { numeric: true }));
+  if (!rows.length) {
+    return (
+      <div className="rounded-2xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400">
+        עדיין אין מסירות בהיסטוריה
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      {rows.map((o) => {
+        const visits = o.attempts || [];
+        const sig = visits.map((a) => a.signatureDataUrl).filter(Boolean).pop() || (typeof o.signature === "string" && o.signature !== "SIGNED" ? o.signature : null);
+        return (
+          <section key={o.id} className="rounded-2xl border border-slate-200/60 bg-white p-4 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <p className="font-semibold text-slate-800">{o.recipientName}</p>
+                <p className="text-xs text-slate-400">
+                  {o.id} · {o.docType} · {o.street} {o.houseNumber}, {o.city}
+                </p>
+              </div>
+              <StatusBadge status={o.status} />
+            </div>
+            <div className="mt-3 flex flex-wrap gap-3">
+              {visits.map((a, i) => (
+                <EvidenceThumb
+                  key={`p${i}`}
+                  src={a.photo && a.photo.dataUrl && a.photo.kind !== "video" ? a.photo.dataUrl : null}
+                  label={`ביקור ${i + 1}: ${a.type}`}
+                  name={`${o.id}-visit-${i + 1}.jpg`}
+                />
+              ))}
+              <EvidenceThumb src={sig} label="חתימת הנמען" name={`${o.id}-recipient-signature.jpg`} />
+              <EvidenceThumb
+                src={o.affidavit && o.affidavit.signature}
+                label="חתימת תצהיר (שליח)"
+                name={`${o.id}-affidavit-signature.jpg`}
+              />
+            </div>
+            {visits.length > 0 && (
+              <ul className="mt-3 space-y-0.5 text-xs text-slate-500">
+                {visits.map((a, i) => (
+                  <li key={`t${i}`}>
+                    ביקור {i + 1} · {a.type} · {a.timestamp}
+                    {a.location ? ` · ${a.location}` : ""}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {isAffidavitSigned(o) && onOpenAffidavit && (
+              <button
+                type="button"
+                onClick={() => onOpenAffidavit(o.id)}
+                className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200 hover:bg-indigo-100"
+              >
+                <FileText className="h-3.5 w-3.5" /> צפייה בתצהיר החתום
+              </button>
+            )}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
 function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notifications = [], onReadNotification, lockedLawyer = null }) {
   const [tab, setTab] = useState("status");
   const [query, setQuery] = useState("");
@@ -2732,6 +2820,7 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notificat
   const navItems = [
     { key: "status", label: "סטטוס", icon: FileText },
     { key: "new", label: "הזמנה חדשה", icon: Plus },
+    { key: "history", label: "היסטוריה", icon: ScrollText },
     { key: "profile", label: "פרופיל", icon: User },
   ];
 
@@ -2950,6 +3039,8 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notificat
             </div>
           </div>
         )}
+
+        {tab === "history" && <OrderHistoryList orders={myOrders} onOpenAffidavit={setAffidavitId} />}
 
         {tab === "profile" && (
           <ProfileTab role="lawyer" subtitle={`מחובר כ: ${currentLawyer}`} onSwitchRole={onSwitchRole} />
@@ -3533,7 +3624,10 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
     // Fresh, high-accuracy fix at the exact moment of saving. If that reading
     // fails but a good one was already taken when the form opened, use that;
     // otherwise warn the courier — never insert invented coordinates.
-    let g = await getGps({ timeout: 4000 });
+    // The reading taken when the form opened is used immediately, so saving
+    // never waits on the GPS chip; a fresh read (4 s max) only happens if
+    // there is no usable reading yet.
+    let g = gps.status === "ok" ? gps : await getGps({ timeout: 4000 });
     if (!g.ok && gps.status === "ok") g = gps;
     if (!g.ok && !allowNoGps) {
       setGps({ status: "error", reason: g.reason });
@@ -3903,6 +3997,26 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
   const today = dayKeyOf(nowStamp(0));
   const lockedToday = !!lastAttempt && dayKeyOf(lastAttempt.timestamp) === today;
 
+  // Right after a "no answer" visit is logged, jump to this card and flash
+  // the next-visit banner (with its countdown + explanation) for a few seconds.
+  const cardRef = useRef(null);
+  const prevAttemptsRef = useRef(order.attempts.length);
+  const [spotlight, setSpotlight] = useState(false);
+  useEffect(() => {
+    const grew = order.attempts.length > prevAttemptsRef.current;
+    prevAttemptsRef.current = order.attempts.length;
+    if (!grew || order.status !== STATUS.PENDING_NEXT_VISIT) return undefined;
+    setSpotlight(true);
+    const t1 = setTimeout(() => {
+      if (cardRef.current) cardRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 150);
+    const t2 = setTimeout(() => setSpotlight(false), 6000);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [order.attempts.length, order.status]);
+
   // Time remaining until local midnight (00:00:00 of the next calendar
   // day), formatted as HH:MM:SS for the locked banner.
   const countdownLabel = useMemo(() => {
@@ -3974,7 +4088,13 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
   const cleanPhoneNumber = rawPhone.replace(/[^\d+]/g, "");
 
   return (
-    <div className="rounded-3xl border border-slate-200/60 bg-white p-4 shadow-sm transition hover:shadow-md">
+    <div
+      ref={cardRef}
+      id={`task-card-${order.id}`}
+      className={`rounded-3xl border bg-white p-4 shadow-sm transition hover:shadow-md ${
+        spotlight ? "border-orange-400 ring-4 ring-orange-200" : "border-slate-200/60"
+      }`}
+    >
       <div className="flex items-start justify-between">
         <div>
           <p className="flex items-center gap-1.5 font-semibold text-slate-800">
@@ -4043,14 +4163,19 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
         </div>
       </div>
       {lockedToday && (
-        <div className="mt-2.5 space-y-1.5 rounded-lg bg-orange-50 px-2.5 py-2 text-xs font-medium text-orange-700 ring-1 ring-inset ring-orange-200">
+        <div
+          className={`mt-2.5 space-y-1.5 rounded-lg bg-orange-50 px-2.5 py-2 text-xs font-medium text-orange-700 ring-1 ring-inset ring-orange-200 ${
+            spotlight ? "animate-pulse ring-2 ring-orange-400" : ""
+          }`}
+        >
+          <p className="text-sm font-bold text-orange-800">⏳ ביקור {attemptsCount + 1} — יתאפשר מחר</p>
           <div className="flex items-center gap-1.5">
             <Lock className="h-3.5 w-3.5 shrink-0" />
             בוצע ביקור היום ({timeOfDay(lastAttempt?.timestamp)}) — לפי תקנות סדר הדין האזרחי, ביקור נוסף יתאפשר רק
             מחר, בשעה אחרת ביום.
           </div>
-          <div className="flex items-center gap-1.5 text-orange-600">
-            <Clock className="h-3.5 w-3.5 shrink-0" />
+          <div className="flex items-center gap-1.5 text-base font-bold text-orange-700">
+            <Clock className="h-4 w-4 shrink-0" />
             <span>הביקור הבא יתאפשר בעוד: {countdownLabel} שעות</span>
           </div>
         </div>
@@ -4427,6 +4552,11 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
     // A delivery / posting / refusal ends the service, so the courier goes
     // straight on to signing that order's affidavit (can also be done later
     // from the Earnings tab).
+    if (attempt.type === "אין מענה") {
+      // Stay on (or return to) the active list so the "ביקור 2" banner is seen.
+      setTab("tasks");
+      setTasksView("active");
+    }
     if (attempt.type !== "אין מענה") {
       setAffidavitId(activeOrder.id);
       // The order has left the active list — make it findable under "בוצעו".
@@ -4437,7 +4567,12 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
   // Saves the courier's signature (base64 PNG) onto the order's affidavit
   // record — the Admin dashboard and Lawyer portal read the same record.
   const handleSignAffidavit = async (orderId, rawSignatureDataUrl) => {
-    const signatureDataUrl = await compressDataUrl(rawSignatureDataUrl);
+    // Compression is best-effort and capped at 700 ms: the completion is saved
+    // right away, never held back by it.
+    const signatureDataUrl = await Promise.race([
+      compressDataUrl(rawSignatureDataUrl),
+      new Promise((resolve) => setTimeout(() => resolve(rawSignatureDataUrl), 700)),
+    ]);
     onUpdateOrder(orderId, (o) => ({
       ...o,
       ...(o.assignedCourier !== currentCourier
@@ -4454,9 +4589,15 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
             closedAt: nowStamp(0),
           }),
     }));
-    captureAuditStamp().then((audit) =>
-      onUpdateOrder(orderId, (o) => (o.assignedCourier === currentCourier ? { ...o, completionAudit: audit } : o))
-    );
+    // GPS arrives later (4 s max) and is merged in only if it was obtained.
+    captureAuditStamp().then((audit) => {
+      if (!audit.gps) return;
+      onUpdateOrder(orderId, (o) =>
+        o.assignedCourier === currentCourier
+          ? { ...o, completionAudit: { ...(o.completionAudit || {}), gps: audit.gps, gpsStatus: "ok", gpsCapturedAt: audit.capturedAt } }
+          : o
+      );
+    });
     // Back to the main tasks screen, on the completed tab, with every
     // affidavit / signature modal closed (the modal closes itself too).
     const own = myOrders.some((o) => o.id === orderId);
@@ -6259,6 +6400,7 @@ function AdminDashboard({
   onCloseAssign,
   notifyPermission = "unsupported",
   onEnableNotify,
+  onTestNotify,
   onSignAffidavit,
 }) {
   const [dashTab, setDashTab] = useState(() => (window.location.hash === "#couriers" ? "couriers" : "overview"));
@@ -6369,6 +6511,20 @@ function AdminDashboard({
         })}
       </div>
 
+      {dashTab !== "overview" && (
+        <button
+          type="button"
+          onClick={() => {
+            setDashTab("overview");
+            setActiveFilter(null);
+            window.scrollTo({ top: 0 });
+          }}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-3 py-1.5 text-sm font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200 hover:bg-indigo-100"
+        >
+          <ArrowRight className="h-4 w-4" /> חזרה לסקירה
+        </button>
+      )}
+
       {dashTab === "profile" && (
         <ProfileTab role="admin" onSwitchRole={onSwitchRole} />
       )}
@@ -6420,13 +6576,28 @@ function AdminDashboard({
           onClose={onCloseAssign}
         />
       )}
-      {notifyPermission === "default" && onEnableNotify && (
+      {notifyPermission !== "granted" && onEnableNotify && (
+        <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4">
+          <button
+            type="button"
+            onClick={onEnableNotify}
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-amber-500 px-4 py-3 text-base font-extrabold text-white shadow hover:bg-amber-600"
+          >
+            🔔 הפעל התראות באנר לנייד (כמו וואטסאפ)
+          </button>
+          <p className="mt-2 text-center text-xs font-medium text-amber-800">
+            באייפון: לחץ שיתוף -&gt; הוסף למסך הבית -&gt; הפעל התראות
+            {notifyPermission === "denied" ? " · ההתראות חסומות בדפדפן — יש לאפשר אותן בהגדרות האתר" : ""}
+          </p>
+        </div>
+      )}
+      {onTestNotify && (
         <button
           type="button"
-          onClick={onEnableNotify}
-          className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700"
+          onClick={onTestNotify}
+          className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-100 sm:w-fit"
         >
-          <Bell className="h-4 w-4" /> הפעלת התראות על מסירות חדשות בנייד
+          📲 שלח התראת בדיקה לנייד
         </button>
       )}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -6851,19 +7022,36 @@ async function registerServiceWorker() {
   }
 }
 
+// WhatsApp-style banner: bold title, 4 short lines, big icon, vibration,
+// stays until tapped, and a one-tap "assign now" action.
 async function showNewOrderNotification(order) {
   const reg = await registerServiceWorker();
   if (!reg) return;
-  const where = [order.city, `${order.street || ""} ${order.houseNumber || ""}`.trim()].filter(Boolean).join(", ");
-  reg.showNotification("מסירה חדשה (אבא תודה)", {
-    body: `${order.submittedBy ? order.submittedBy + " ← " : ""}${order.recipientName || ""} · ${where}\n${order.id}`,
+  const address = [`${order.street || ""} ${order.houseNumber || ""}`.trim(), order.city].filter(Boolean).join(", ");
+  reg.showNotification("📦 מסירה חדשה (אבא תודה)", {
+    body: `לקוח: ${order.submittedBy || "—"}\nנמען: ${order.recipientName || "—"}\nכתובת: ${address || "—"}\nלחץ כאן לשיבוץ שליח מיידי 🛵`,
     tag: `new-order-${order.id}`,
     dir: "rtl",
     lang: "he",
     vibrate: [200, 100, 200],
     icon: "/icon-192.png",
     badge: "/icon-192.png",
+    requireInteraction: true,
+    renotify: true,
+    actions: [{ action: "assign", title: "שבץ שליח עכשיו" }],
     data: { orderId: order.id, url: `${SITE_URL}/#assign=${order.id}` },
+  });
+}
+
+// Admin "send me a test banner" button — same look as a real new order.
+async function showTestNotification() {
+  await showNewOrderNotification({
+    id: "TEST",
+    submittedBy: "לקוח לדוגמה",
+    recipientName: "נמען לדוגמה",
+    street: "הרצל",
+    houseNumber: "1",
+    city: "תל אביב",
   });
 }
 
@@ -6878,7 +7066,7 @@ function useAdminOrderAlerts({ enabled, ready, orders, onOpenOrder }) {
     if (!enabled || !NOTIFY_SUPPORTED()) return undefined;
     registerServiceWorker();
     const onMessage = (e) => {
-      if (e.data && e.data.type === "assign" && e.data.orderId) openRef.current(e.data.orderId);
+      if (e.data && e.data.type === "assign" && e.data.orderId && e.data.orderId !== "TEST") openRef.current(e.data.orderId);
     };
     window.navigator.serviceWorker.addEventListener("message", onMessage);
     return () => window.navigator.serviceWorker.removeEventListener("message", onMessage);
@@ -6904,7 +7092,11 @@ function useAdminOrderAlerts({ enabled, ready, orders, onOpenOrder }) {
       setPermission("denied");
     }
   };
-  return { permission, requestPermission };
+  const sendTest = async () => {
+    if (window.Notification.permission !== "granted") await requestPermission();
+    if (NOTIFY_SUPPORTED() && window.Notification.permission === "granted") await showTestNotification();
+  };
+  return { permission, requestPermission, sendTest };
 }
 
 // Orange one-tap assignment banner — opened by the #assign=<ORDER_ID> link.
@@ -7040,9 +7232,11 @@ async function orderToRow(o) {
 // One visit (attempt) -> visits row, uploading its media first.
 async function visitToRow(order, a, seq, courierId) {
   const base = `${order.id}/visit-${seq}`;
-  const photoUrl = a.photo && a.photo.dataUrl ? await uploadEvidence(`${base}-photo`, a.photo.dataUrl) : null;
-  const audioUrl = typeof a.audio === "string" ? await uploadEvidence(`${base}-audio`, a.audio) : null;
-  const signatureUrl = a.signatureDataUrl ? await uploadEvidence(`${base}-signature`, a.signatureDataUrl) : null;
+  const [photoUrl, audioUrl, signatureUrl] = await Promise.all([
+    a.photo && a.photo.dataUrl ? uploadEvidence(`${base}-photo`, a.photo.dataUrl) : null,
+    typeof a.audio === "string" ? uploadEvidence(`${base}-audio`, a.audio) : null,
+    a.signatureDataUrl ? uploadEvidence(`${base}-signature`, a.signatureDataUrl) : null,
+  ]);
   return {
     order_id: order.id,
     seq,
@@ -7663,6 +7857,18 @@ function useCloudStore(profile, setters) {
   const payrollWrittenRef = useRef(new window.Map());
   const payrollKeysRef = useRef(new window.Set());
 
+  // Closing / reloading while uploads are still running would lose them.
+  useEffect(() => {
+    const warn = (e) => {
+      if (pendingRef.current > 0) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, []);
+
   const api = useMemo(() => {
     const refreshOrders = async () => {
       if (!profileRef.current) return;
@@ -7756,6 +7962,13 @@ function useCloudStore(profile, setters) {
             notifyNewOrderEverywhere(o); // only after a successful insert
             continue;
           }
+          // Terminal status FIRST (a tiny write, no uploads): even if the courier
+          // refreshes while photos / audio are still uploading, the order is
+          // already out of the active list after the reload.
+          if (o.status !== p.status) {
+            const { error: e0 } = await supabase.from("orders").update({ status: o.status }).eq("id", o.id);
+            if (e0) throw e0;
+          }
           for (let i = p.attempts.length; i < o.attempts.length; i += 1) {
             const row = await visitToRow(o, o.attempts[i], i + 1, o.courierId || profileRef.current.id);
             const { error: e } = await supabase.from("visits").insert(row);
@@ -7791,8 +8004,11 @@ function useCloudStore(profile, setters) {
     const setUserBlocked = async (userId, blocked) => {
       const { error: e } = await supabase.rpc("set_user_blocked", { p_user_id: userId, p_blocked: blocked });
       if (e) setError(e.message || String(e));
-      refreshCouriers();
-      refreshLawyers();
+      // Background re-sync (the UI was already updated optimistically).
+      setTimeout(() => {
+        refreshCouriers();
+        refreshLawyers();
+      }, 0);
     };
 
     // Next clean order number (ORD-1001 …) from the database sequence.
@@ -8748,7 +8964,8 @@ function AppInner() {
       </div>
     );
   }
-  if (auth.loading) return <FullScreenLoader text="מתחבר..." />;
+  // Never replace a mounted app with the loader while a profile already exists.
+  if (auth.loading && !auth.profile) return <FullScreenLoader text="מתחבר..." />;
   // Arrived from the password-reset email: choose a new password first.
   if (auth.recovery) {
     return (
@@ -9119,7 +9336,8 @@ function AppShell({ profile, onSignOut }) {
         list.map((x) => (x.id === c.id || (email && (x.email || "").toLowerCase() === email) ? { ...x, blocked } : x));
       setCouriers(flip);
       setLawyers(flip);
-      if (cloudOn) cloudSetUserBlocked(c.id, blocked);
+      // Fire-and-forget: the buttons flip instantly and the screen never waits.
+      if (cloudOn) Promise.resolve(cloudSetUserBlocked(c.id, blocked)).catch(() => {});
       notifyUserBlockChange(c, blocked);
     },
     [cloudOn, cloudSetUserBlocked]
@@ -9320,6 +9538,7 @@ function AppShell({ profile, onSignOut }) {
           onCloseAssign={closeAssign}
           notifyPermission={alerts.permission}
           onEnableNotify={alerts.requestPermission}
+          onTestNotify={alerts.sendTest}
           onSignAffidavit={handleAdminSignAffidavit}
         />
       )}
