@@ -5,6 +5,7 @@ self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim(
 
 // Tap on the "מסירה חדשה" banner: focus the open app and tell it which order to
 // assign; if the app is closed, open https://<site>/#assign=<ORDER_ID>.
+// The "שבץ שליח עכשיו" action button and a tap on the body do the same thing.
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const data = event.notification.data || {};
@@ -19,7 +20,7 @@ self.addEventListener("notificationclick", (event) => {
           return;
         }
       }
-      await self.clients.openWindow(url);
+      await self.clients.openWindow(data.orderId === "TEST" ? "/" : url);
     })()
   );
 });
