@@ -887,6 +887,16 @@ const LAWYERS = [
   'עו"ד רונית שגיא',
 ];
 
+// Demo-mode client list for the Admin "לקוחות" section (cloud mode loads real profiles).
+const DEMO_LAWYERS = LAWYERS.map((name, i) => ({
+  id: `LW-${i + 1}`,
+  name,
+  email: `client${i + 1}@example.com`,
+  phone: "",
+  firm: "",
+  blocked: false,
+}));
+
 // Attorney details auto-filled into the affidavit's verification block.
 const LAWYER_PROFILES = {
   'עו"ד ישראל ישראלי': { licenseNo: "45821", firm: "ישראלי ושות' — משרד עורכי דין", address: "שדרות רוטשילד 45, תל אביב", phone: "03-5551234" },
@@ -1079,30 +1089,50 @@ function coordNearCity(city) {
 // can't be shared) can live on the order record itself, so Admin and the
 // ordering lawyer can open the evidence later. Downscaling keeps the
 // in-memory order list light even with many phone-camera photos.
-function fileToDataUrl(file, maxDim = 1280, quality = 0.72) {
+// Canvas compression shared by photos and signatures: scales the longest side
+// down to `maxDim` (never up) and re-encodes as JPEG (white background, so a
+// transparent signature PNG stays readable). Any failure returns the original.
+// A ~8 MB camera photo becomes roughly 150 KB — fast to upload on weak signal.
+function compressDataUrl(src, maxDim = 1280, quality = 0.75) {
+  return new Promise((resolve) => {
+    const img = new window.Image();
+    img.onerror = () => resolve(src);
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      } catch (e) {
+        resolve(src);
+      }
+    };
+    img.src = src;
+  });
+}
+
+function fileToDataUrl(file, maxDim = 1280, quality = 0.75) {
   return new Promise((resolve, reject) => {
     const reader = new window.FileReader();
     reader.onerror = () => reject(reader.error);
-    reader.onload = () => {
-      const raw = reader.result;
-      const img = new window.Image();
-      img.onerror = () => resolve(raw);
-      img.onload = () => {
-        try {
-          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-          const canvas = document.createElement("canvas");
-          canvas.width = Math.round(img.width * scale);
-          canvas.height = Math.round(img.height * scale);
-          canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-          resolve(canvas.toDataURL("image/jpeg", quality));
-        } catch (e) {
-          resolve(raw);
-        }
-      };
-      img.src = raw;
-    };
+    reader.onload = () => resolve(compressDataUrl(reader.result, maxDim, quality));
     reader.readAsDataURL(file);
   });
+}
+
+// Legal audit stamp for a completed delivery: exact ISO time plus a GPS fix.
+// Never blocks: a denied / missing / slow (>4 s) GPS just yields gps: null.
+async function captureAuditStamp() {
+  const capturedAt = new window.Date().toISOString();
+  const g = await getGps({ timeout: 4000 });
+  return g.ok
+    ? { capturedAt, gps: { lat: g.lat, lng: g.lng, accuracy: g.accuracy }, gpsStatus: "ok" }
+    : { capturedAt, gps: null, gpsStatus: g.reason || "unavailable" };
 }
 
 function randomIsraelCoord() {
@@ -1759,9 +1789,18 @@ const inputCls =
   "w-full rounded-3xl border border-slate-200/60 bg-white px-3.5 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-4 focus:ring-indigo-500/15 transition-all duration-300 ease-in-out";
 
 function Modal({ open, onClose, title, children, wide }) {
+  // Escape closes the dialog (accessibility). Hook sits before the early return.
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose && onClose();
+    };
+    window.document.addEventListener("keydown", onKey);
+    return () => window.document.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label={title}>
       <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={onClose} />
       <div
         className={`relative z-10 max-h-[90vh] w-full ${
@@ -1772,6 +1811,7 @@ function Modal({ open, onClose, title, children, wide }) {
           <h3 className="text-base font-bold text-indigo-700">{title}</h3>
           <button
             onClick={onClose}
+            aria-label="סגירה"
             className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
           >
             <X className="h-4.5 w-4.5" />
@@ -3493,7 +3533,7 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
     // Fresh, high-accuracy fix at the exact moment of saving. If that reading
     // fails but a good one was already taken when the form opened, use that;
     // otherwise warn the courier — never insert invented coordinates.
-    let g = await getGps();
+    let g = await getGps({ timeout: 4000 });
     if (!g.ok && gps.status === "ok") g = gps;
     if (!g.ok && !allowNoGps) {
       setGps({ status: "error", reason: g.reason });
@@ -3514,6 +3554,12 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
       audio: typeof audioOk === "string" ? audioOk : null,
       audioRecorded: !!audioOk,
       courier: order.assignedCourier,
+      // Legal audit stamp: exact ISO time + GPS of the moment of reporting.
+      audit: {
+        capturedAt: new window.Date().toISOString(),
+        gps: g.ok ? { lat: g.lat, lng: g.lng, accuracy: g.accuracy } : null,
+        gpsStatus: g.ok ? "ok" : g.reason || "unavailable",
+      },
       notes:
         actionType === "refused"
           ? `סירוב מתועד. תיאור: ${description}`
@@ -3522,7 +3568,7 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
           : actionType === "noanswer"
           ? "לא נענתה הדלת, הביקור הבא יתוזמן"
           : "נמסר וחתום על ידי הנמען",
-      ...(actionType === "delivered" && recipientSig ? { signatureDataUrl: recipientSig } : {}),
+      ...(actionType === "delivered" && recipientSig ? { signatureDataUrl: await compressDataUrl(recipientSig) } : {}),
     });
     onClose();
   };
@@ -4390,13 +4436,16 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
 
   // Saves the courier's signature (base64 PNG) onto the order's affidavit
   // record — the Admin dashboard and Lawyer portal read the same record.
-  const handleSignAffidavit = (orderId, signatureDataUrl) => {
+  const handleSignAffidavit = async (orderId, rawSignatureDataUrl) => {
+    const signatureDataUrl = await compressDataUrl(rawSignatureDataUrl);
     onUpdateOrder(orderId, (o) => ({
       ...o,
       ...(o.assignedCourier !== currentCourier
         ? {}
         : {
             affidavit: { signature: signatureDataUrl, signedAt: nowStamp(0), signedBy: currentCourier },
+            // Audit trail: ISO time now; the GPS fix is added right after (never blocks).
+            completionAudit: { capturedAt: new window.Date().toISOString(), gps: null, gpsStatus: "pending" },
             // Signing the affidavit completes and closes the task.
             completed: true,
             completedAt: nowStamp(0),
@@ -4405,6 +4454,9 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
             closedAt: nowStamp(0),
           }),
     }));
+    captureAuditStamp().then((audit) =>
+      onUpdateOrder(orderId, (o) => (o.assignedCourier === currentCourier ? { ...o, completionAudit: audit } : o))
+    );
     // Back to the main tasks screen, on the completed tab, with every
     // affidavit / signature modal closed (the modal closes itself too).
     const own = myOrders.some((o) => o.id === orderId);
@@ -5898,6 +5950,73 @@ function CourierRegistrationModal({ open, onClose, onSubmit }) {
 // details, region, license, business type, and live stats (how many orders
 // are currently assigned to them vs. how many they've completed), pulled
 // straight from the current `orders` list so the numbers are always fresh.
+// Admin: registered law firms / clients with the same block / restore switch as couriers.
+function LawyerDirectory({ lawyers, orders, onSetBlocked }) {
+  const countFor = (l) => orders.filter((o) => o.lawyerId === l.id || (!o.lawyerId && o.submittedBy === l.name)).length;
+  return (
+    <div className="space-y-3">
+      <div>
+        <h3 className="text-base font-bold text-indigo-700">עורכי דין ולקוחות</h3>
+        <p className="text-xs text-slate-500">{lawyers.length} חשבונות רשומים</p>
+      </div>
+      <div className="overflow-x-auto rounded-2xl border border-slate-200/60 bg-white">
+        <table className="w-full min-w-[640px] text-sm">
+          <thead>
+            <tr className="bg-slate-50 text-right text-xs text-slate-400">
+              <th className="px-3 py-2 font-medium">שם / משרד</th>
+              <th className="px-3 py-2 font-medium">אימייל</th>
+              <th className="px-3 py-2 font-medium">הזמנות</th>
+              <th className="px-3 py-2 font-medium">סטטוס</th>
+            </tr>
+          </thead>
+          <tbody>
+            {lawyers.map((l) => (
+              <tr key={l.id} className="border-t border-slate-100">
+                <td className="px-3 py-2.5 font-medium text-slate-700">{l.name}</td>
+                <td className="px-3 py-2.5 text-slate-500" dir="ltr">{l.email}</td>
+                <td className="px-3 py-2.5 text-slate-600">{countFor(l)}</td>
+                <td className="px-3 py-2.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {l.blocked ? (
+                      <span className={`${PILL} bg-rose-50 text-rose-700 ring-rose-200`}>
+                        <Lock className="h-2.5 w-2.5" /> מושבת
+                      </span>
+                    ) : (
+                      <span className={`${PILL} bg-emerald-50 text-emerald-700 ring-emerald-200`}>
+                        <BadgeCheck className="h-2.5 w-2.5" /> פעיל
+                      </span>
+                    )}
+                    {onSetBlocked && (
+                      <button
+                        type="button"
+                        onClick={() => onSetBlocked(l, !l.blocked)}
+                        className={`rounded-md px-2 py-0.5 text-[11px] font-semibold ${
+                          l.blocked
+                            ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                            : "border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                        }`}
+                      >
+                        {l.blocked ? "החזר לפעילות" : "חסום מפעילות"}
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {lawyers.length === 0 && (
+              <tr>
+                <td colSpan={4} className="py-8 text-center text-sm text-slate-400">
+                  אין עדיין עורכי דין או לקוחות רשומים
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function CourierDirectory({ couriers, orders, onRegisterCourier, onApproveCourier, onSetBlocked }) {
   const [showForm, setShowForm] = useState(false);
 
@@ -6135,6 +6254,7 @@ function AdminDashboard({
   onRegisterCourier,
   onApproveCourier,
   onSetBlocked,
+  lawyers = [],
   assignOrderId = "",
   onCloseAssign,
   notifyPermission = "unsupported",
@@ -6268,13 +6388,16 @@ function AdminDashboard({
       )}
 
       {dashTab === "couriers" && (
-        <CourierDirectory
-          couriers={couriers || COURIERS}
-          orders={orders}
-          onRegisterCourier={onRegisterCourier}
-          onApproveCourier={onApproveCourier}
-          onSetBlocked={onSetBlocked}
-        />
+        <div className="space-y-8">
+          <CourierDirectory
+            couriers={couriers || COURIERS}
+            orders={orders}
+            onRegisterCourier={onRegisterCourier}
+            onApproveCourier={onApproveCourier}
+            onSetBlocked={onSetBlocked}
+          />
+          <LawyerDirectory lawyers={lawyers} orders={orders} onSetBlocked={onSetBlocked} />
+        </div>
       )}
 
       {dashTab === "requests" && (
@@ -6621,14 +6744,40 @@ const authStorage = {
 // An e-mail verification / password-reset link carries its own tokens in the
 // URL; those are untouched, so the verification flow still works.
 const AUTH_TOKEN_KEY = /^sb-.+-auth-token/;
+// Deletes the stored sessions and returns their access tokens (for revocation).
 const wipeAuthTokens = (store) => {
+  const tokens = [];
   try {
     Object.keys(store)
       .filter((k) => AUTH_TOKEN_KEY.test(k))
-      .forEach((k) => store.removeItem(k));
+      .forEach((k) => {
+        try {
+          const t = JSON.parse(store.getItem(k) || "null");
+          if (t && t.access_token) tokens.push(t.access_token);
+        } catch (e) {
+          /* not JSON — just delete it */
+        }
+        store.removeItem(k);
+      });
   } catch (e) {
     /* storage unavailable */
   }
+  return tokens;
+};
+// Also end the wiped sessions on the server, in the background. scope=local
+// revokes ONLY that one session — the default (global) would sign the user out
+// on every device, including ones where they ticked "הישאר מחובר".
+const revokeTokensOnServer = (tokens) => {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return;
+  tokens.forEach((token) => {
+    window
+      .fetch(`${SUPABASE_URL}/auth/v1/logout?scope=local`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, apikey: SUPABASE_ANON_KEY },
+        keepalive: true,
+      })
+      .catch(() => {});
+  });
 };
 (() => {
   const arrivedViaAuthLink = /access_token=|[?&]code=|type=(signup|email|recovery|magiclink|invite)\b/.test(
@@ -6642,7 +6791,7 @@ const wipeAuthTokens = (store) => {
     return;
   }
   if (arrivedViaAuthLink) return;
-  wipeAuthTokens(window.localStorage);
+  const stale = wipeAuthTokens(window.localStorage);
   let navType = "navigate";
   try {
     const entry = window.performance.getEntriesByType("navigation")[0];
@@ -6650,7 +6799,8 @@ const wipeAuthTokens = (store) => {
   } catch (e) {
     /* default: treat as a fresh visit */
   }
-  if (navType !== "reload") wipeAuthTokens(window.sessionStorage);
+  if (navType !== "reload") stale.push(...wipeAuthTokens(window.sessionStorage));
+  revokeTokensOnServer(stale);
 })();
 const supabase =
   SUPABASE_URL && SUPABASE_ANON_KEY
@@ -6908,6 +7058,7 @@ async function visitToRow(order, a, seq, courierId) {
       notes: a.notes || "",
       courier: a.courier || order.assignedCourier || "",
       audioRecorded: !!(a.audioRecorded || audioUrl),
+      audit: a.audit || null,
     },
     photo_url: photoUrl,
     photo_meta: a.photo ? { kind: a.photo.kind || "image", timestamp: a.photo.timestamp, gps: a.photo.gps ?? null } : null,
@@ -7008,6 +7159,20 @@ async function cloudFetchResponses() {
     outcome: r.outcome,
     acknowledged: !!r.acknowledged,
     at: new window.Date(r.updated_at || r.created_at).toLocaleString("he-IL"),
+  }));
+}
+
+// Admin only: registered law firms / clients (profiles.role = 'lawyer').
+async function cloudFetchLawyers() {
+  const { data, error } = await supabase.from("profiles").select("*").eq("role", "lawyer").order("full_name");
+  if (error) throw error;
+  return (data || []).map((p) => ({
+    id: p.id,
+    name: p.full_name,
+    email: p.email || "",
+    phone: p.phone || "",
+    firm: p.firm || "",
+    blocked: !!p.blocked,
   }));
 }
 
@@ -7159,6 +7324,46 @@ async function notifyAdminOfCourier(c) {
     console.warn("Courier webhook failed (registration itself succeeded):", e);
     return false;
   }
+}
+
+// Guaranteed external alert for the admin (works when the phone app is killed):
+// the SAME Make webhook as the courier sign-up, event "new_order", with the
+// deep link that opens the orange assignment banner.
+async function notifyAdminNewOrder(o) {
+  if (!/^https:\/\//i.test(COURIER_WEBHOOK_URL)) return false;
+  // Don't alert twice when both webhook constants point at the same scenario.
+  if (COURIER_WEBHOOK_URL === NEW_ORDER_WEBHOOK_URL) return false;
+  try {
+    const assignUrl = `${SITE_URL}/#assign=${o.id}`;
+    const destination = `${o.street || ""} ${o.houseNumber || ""}, ${o.city || ""}`.trim();
+    const body = new window.URLSearchParams({
+      event: "new_order",
+      notify_email: ADMIN_NOTIFY_EMAIL,
+      subject: "מסירה חדשה (אבא תודה)",
+      assign_url: assignUrl,
+      order_id: String(o.id || ""),
+      client: o.submittedBy || "",
+      recipient: o.recipientName || "",
+      destination,
+      city: o.city || "",
+      region: o.region || "",
+      doc_type: (o.docType === "אחר" && o.customDocType ? o.customDocType : o.docType) || "",
+      urgent: o.urgent ? "yes" : "no",
+      created_at: new window.Date().toISOString(),
+      message: `מסירה חדשה (אבא תודה)\nלקוח: ${o.submittedBy || ""}\nנמען: ${o.recipientName || ""}\nיעד: ${destination}\nמס' הזמנה: ${o.id}\nלשיבוץ שליח: ${assignUrl}`,
+    });
+    await window.fetch(COURIER_WEBHOOK_URL, { method: "POST", mode: "no-cors", body, keepalive: true });
+    return true;
+  } catch (e) {
+    console.warn("Admin new-order alert failed (the order itself was saved):", e);
+    return false;
+  }
+}
+
+// Both new-order webhooks (client alert + admin alert) in one call.
+function notifyNewOrderEverywhere(o) {
+  notifyNewOrder(o);
+  notifyAdminNewOrder(o);
 }
 
 // Admin blocked / restored a user: tell Make (same webhook as the courier
@@ -7487,6 +7692,14 @@ function useCloudStore(profile, setters) {
         setError(e.message || String(e));
       }
     };
+    const refreshLawyers = async () => {
+      if (!profileRef.current || profileRef.current.role !== "admin") return;
+      try {
+        settersRef.current.setLawyers(await cloudFetchLawyers());
+      } catch (e) {
+        setError(e.message || String(e));
+      }
+    };
     const refreshCouriers = async () => {
       if (!profileRef.current || profileRef.current.role !== "admin") return;
       try {
@@ -7540,7 +7753,7 @@ function useCloudStore(profile, setters) {
           if (!p) {
             const { error: e } = await supabase.from("orders").insert(await orderToRow(o));
             if (e) throw e;
-            notifyNewOrder(o); // only after a successful insert
+            notifyNewOrderEverywhere(o); // only after a successful insert
             continue;
           }
           for (let i = p.attempts.length; i < o.attempts.length; i += 1) {
@@ -7579,6 +7792,7 @@ function useCloudStore(profile, setters) {
       const { error: e } = await supabase.rpc("set_user_blocked", { p_user_id: userId, p_blocked: blocked });
       if (e) setError(e.message || String(e));
       refreshCouriers();
+      refreshLawyers();
     };
 
     // Next clean order number (ORD-1001 …) from the database sequence.
@@ -7698,6 +7912,7 @@ function useCloudStore(profile, setters) {
       cancelOrder,
       setUserBlocked,
       nextOrderId,
+      refreshLawyers,
       refreshResponses,
       respondToOrder,
       acknowledgeResponse,
@@ -7719,6 +7934,7 @@ function useCloudStore(profile, setters) {
         api.refreshOrders(),
         api.refreshNotifications(),
         api.refreshCouriers(),
+        api.refreshLawyers(),
         api.refreshSettings(),
         api.refreshResponses(),
       ]);
@@ -7740,7 +7956,10 @@ function useCloudStore(profile, setters) {
       .on("postgres_changes", { event: "*", schema: "public", table: "order_responses" }, () =>
         later("r", api.refreshResponses)
       )
-      .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => later("p", api.refreshCouriers))
+      .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => {
+        later("p", api.refreshCouriers);
+        later("l", api.refreshLawyers);
+      })
       .on("postgres_changes", { event: "*", schema: "public", table: "settings" }, () => later("s", api.refreshSettings))
       .subscribe();
     return () => {
@@ -8340,7 +8559,184 @@ function PendingApprovalScreen({ profile, onRefresh, onSignOut }) {
 const DEMO_ALLOWED = !!import.meta.env.DEV || import.meta.env.VITE_ALLOW_DEMO === "true";
 const KNOWN_ROLES = ["admin", "courier", "lawyer"];
 
-export default function App() {
+// ---------------------------------------------------------------------------
+// ACCESSIBILITY WIDGET (תקן ישראלי 5568 / WCAG 2.1 AA) — self-contained.
+// Toggles classes on <html>; the CSS below is injected once. Prefs persist in
+// localStorage (best effort). Rendered at the root, so it shows on every screen.
+// ---------------------------------------------------------------------------
+const A11Y_KEY = "mesirot-a11y";
+const A11Y_DEFAULT = { text: 0, contrast: false, gray: false, links: false, motion: false };
+const A11Y_CSS = `
+html.a11y-t1{font-size:115%}
+html.a11y-t2{font-size:130%}
+html.a11y-gray{filter:grayscale(1)}
+html.a11y-contrast body{background:#000!important;color:#fff!important}
+html.a11y-contrast body *:not(#a11y-root):not(#a11y-root *){background-color:#000!important;color:#fff!important;border-color:#fff!important;box-shadow:none!important}
+html.a11y-contrast body a{color:#ff0!important}
+html.a11y-links a,html.a11y-links button,html.a11y-links [role="button"]{outline:3px solid #f59e0b!important;outline-offset:2px;text-decoration:underline!important}
+html.a11y-motion *,html.a11y-motion *::before,html.a11y-motion *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+#a11y-root button:focus-visible{outline:3px solid #2563eb;outline-offset:2px}
+`;
+
+function AccessibilityWidget() {
+  const [open, setOpen] = useState(false);
+  const [statement, setStatement] = useState(false);
+  const [prefs, setPrefs] = useState(() => {
+    try {
+      return { ...A11Y_DEFAULT, ...JSON.parse(window.localStorage.getItem(A11Y_KEY) || "{}") };
+    } catch (e) {
+      return A11Y_DEFAULT;
+    }
+  });
+
+  // Inject the stylesheet once.
+  useEffect(() => {
+    const doc = window.document;
+    if (doc.getElementById("a11y-style")) return;
+    const st = doc.createElement("style");
+    st.id = "a11y-style";
+    st.textContent = A11Y_CSS;
+    doc.head.appendChild(st);
+  }, []);
+
+  // Apply + persist.
+  useEffect(() => {
+    const cl = window.document.documentElement.classList;
+    cl.toggle("a11y-t1", prefs.text === 1);
+    cl.toggle("a11y-t2", prefs.text === 2);
+    cl.toggle("a11y-contrast", prefs.contrast);
+    cl.toggle("a11y-gray", prefs.gray);
+    cl.toggle("a11y-links", prefs.links);
+    cl.toggle("a11y-motion", prefs.motion);
+    try {
+      window.localStorage.setItem(A11Y_KEY, JSON.stringify(prefs));
+    } catch (e) {
+      /* storage unavailable */
+    }
+  }, [prefs]);
+
+  // Escape closes the menu (the statement modal handles its own Escape).
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.document.addEventListener("keydown", onKey);
+    return () => window.document.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  const set = (patch) => setPrefs((p) => ({ ...p, ...patch }));
+  const row = (active, label, onClick) => (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-right text-sm font-medium ${
+        active ? "border-indigo-600 bg-indigo-600 text-white" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+      }`}
+    >
+      <span>{label}</span>
+      <span aria-hidden="true" className="text-xs">{active ? "פעיל" : "כבוי"}</span>
+    </button>
+  );
+
+  return (
+    <div id="a11y-root" dir="rtl" className="fixed bottom-20 left-3 z-[60] sm:bottom-4">
+      {open && (
+        <div
+          role="region"
+          aria-label="תפריט נגישות"
+          className="mb-2 w-64 space-y-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl"
+        >
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-bold text-indigo-700">נגישות</h2>
+            <button type="button" onClick={() => setOpen(false)} aria-label="סגירת תפריט נגישות" className="rounded-full p-1 text-slate-500 hover:bg-slate-100">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              aria-pressed={prefs.text === 1}
+              onClick={() => set({ text: prefs.text === 1 ? 0 : 1 })}
+              className={`rounded-lg border px-2 py-2 text-sm font-medium ${prefs.text === 1 ? "border-indigo-600 bg-indigo-600 text-white" : "border-slate-200 bg-white text-slate-700"}`}
+            >
+              טקסט +15%
+            </button>
+            <button
+              type="button"
+              aria-pressed={prefs.text === 2}
+              onClick={() => set({ text: prefs.text === 2 ? 0 : 2 })}
+              className={`rounded-lg border px-2 py-2 text-sm font-medium ${prefs.text === 2 ? "border-indigo-600 bg-indigo-600 text-white" : "border-slate-200 bg-white text-slate-700"}`}
+            >
+              טקסט +30%
+            </button>
+          </div>
+          {row(prefs.contrast, "ניגודיות גבוהה", () => set({ contrast: !prefs.contrast }))}
+          {row(prefs.gray, "גווני אפור", () => set({ gray: !prefs.gray }))}
+          {row(prefs.links, "הדגשת קישורים וכפתורים", () => set({ links: !prefs.links }))}
+          {row(prefs.motion, "עצירת אנימציות", () => set({ motion: !prefs.motion }))}
+          <button type="button" onClick={() => setPrefs(A11Y_DEFAULT)} className="w-full rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700">
+            איפוס הגדרות
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setStatement(true);
+              setOpen(false);
+            }}
+            className="w-full rounded-lg bg-slate-800 px-3 py-2 text-sm font-medium text-white"
+          >
+            הצהרת נגישות
+          </button>
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="תפריט נגישות"
+        aria-expanded={open}
+        className="flex h-11 w-11 items-center justify-center rounded-full bg-indigo-600 text-white shadow-lg ring-2 ring-white hover:bg-indigo-700"
+      >
+        <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <circle cx="12" cy="4.5" r="1.8" />
+          <path d="M5 8.5h14M12 8.5v5.5M12 14l-3.5 6M12 14l3.5 6" />
+        </svg>
+      </button>
+
+      <Modal open={statement} onClose={() => setStatement(false)} title="הצהרת נגישות" wide>
+        <div className="space-y-3 text-sm leading-relaxed text-slate-700">
+          <p>
+            אתר mesirot.express שואף להיות נגיש לכלל המשתמשים, לרבות אנשים עם מוגבלות, ופועל להתאמת השירות להוראות
+            תקנות שוויון זכויות לאנשים עם מוגבלות (התאמות נגישות לשירות), התשע"ג-2013, ולתקן הישראלי ת"י 5568 המבוסס על
+            הנחיות WCAG 2.1 ברמה AA.
+          </p>
+          <p className="font-semibold">התאמות נגישות שבוצעו</p>
+          <ul className="list-disc space-y-1 pr-5">
+            <li>תפריט נגישות: הגדלת טקסט, ניגודיות גבוהה, גווני אפור, הדגשת קישורים וכפתורים ועצירת אנימציות.</li>
+            <li>תמיכה מלאה בעברית ובכיווניות מימין לשמאל (RTL).</li>
+            <li>ניווט במקלדת וסגירת חלונות ותפריטים באמצעות מקש Escape.</li>
+            <li>תיוג ARIA לכפתורים וחלונות קופצים.</li>
+          </ul>
+          <p>
+            למרות המאמצים, ייתכן שחלקים מסוימים באתר עדיין אינם נגישים במלואם. אנו ממשיכים לשפר את הנגישות באופן שוטף.
+          </p>
+          <p className="font-semibold">פניות בנושא נגישות</p>
+          <p>
+            נתקלתם בבעיית נגישות? נשמח לשמוע ולטפל בהקדם: דוא"ל{" "}
+            <a className="font-medium text-indigo-700 underline" href="mailto:mesirot.express@gmail.com">
+              mesirot.express@gmail.com
+            </a>
+            . נא לציין את כתובת העמוד ואת מהות הבעיה.
+          </p>
+          <p className="text-xs text-slate-400">תאריך עדכון ההצהרה האחרון: 16.10.2026</p>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+function AppInner() {
   useHeebo();
   const auth = useAuth();
   if (!CLOUD_ENABLED) {
@@ -8413,6 +8809,8 @@ function AppShell({ profile, onSignOut }) {
   // grown by the Admin's Courier Onboarding form. Every region-filtered
   // dispatch dropdown and the Courier Directory table both read from here.
   const [couriers, setCouriers] = useState(cloudOn ? [] : COURIERS);
+  // Registered law firms / clients (Admin "לקוחות" section; block / restore).
+  const [lawyers, setLawyers] = useState(cloudOn ? [] : DEMO_LAWYERS);
   // In-app notifications for the Lawyer/Client portal. Created automatically
   // the moment any order is completed AND its affidavit signed — whoever
   // signed it (courier or Admin) — so every portal reads one shared source.
@@ -8432,6 +8830,7 @@ function AppShell({ profile, onSignOut }) {
     setNotifications,
     setResponses,
     setCouriers,
+    setLawyers,
     setPricing,
     setPayments,
     setAdjustments,
@@ -8604,7 +9003,7 @@ function AppShell({ profile, onSignOut }) {
     setOrders((prev) => [newOrder, ...prev]);
     // Cloud mode fires the webhook after the DB insert succeeds (persistOrders);
     // demo mode has no DB, so it fires right away.
-    if (!cloudOn) notifyNewOrder(newOrder);
+    if (!cloudOn) notifyNewOrderEverywhere(newOrder);
   }, [cloudOn, profile, setOrders, cloudNextOrderId]);
 
   // Lawyer cancels an order that has no courier yet. Re-checks the rule against
@@ -8716,9 +9115,10 @@ function AppShell({ profile, onSignOut }) {
   const handleSetBlocked = useCallback(
     (c, blocked) => {
       const email = (c.email || "").toLowerCase();
-      setCouriers((prev) =>
-        prev.map((x) => (x.id === c.id || (email && (x.email || "").toLowerCase() === email) ? { ...x, blocked } : x))
-      );
+      const flip = (list) =>
+        list.map((x) => (x.id === c.id || (email && (x.email || "").toLowerCase() === email) ? { ...x, blocked } : x));
+      setCouriers(flip);
+      setLawyers(flip);
       if (cloudOn) cloudSetUserBlocked(c.id, blocked);
       notifyUserBlockChange(c, blocked);
     },
@@ -8915,6 +9315,7 @@ function AppShell({ profile, onSignOut }) {
           onRegisterCourier={handleRegisterCourier}
           onApproveCourier={cloud.approveCourier}
           onSetBlocked={handleSetBlocked}
+          lawyers={lawyers}
           assignOrderId={assignOrderId}
           onCloseAssign={closeAssign}
           notifyPermission={alerts.permission}
@@ -8924,5 +9325,14 @@ function AppShell({ profile, onSignOut }) {
       )}
     </div>
     </SessionContext.Provider>
+  );
+}
+
+export default function App() {
+  return (
+    <>
+      <AppInner />
+      <AccessibilityWidget />
+    </>
   );
 }
