@@ -1185,6 +1185,68 @@ function timeOfDay(timestamp) {
   return "ערב";
 }
 
+// Legal visit windows (Regulation 161 practice): every "no answer" visit must
+// fall in a DIFFERENT window on a DIFFERENT calendar day.
+const VISIT_WINDOWS = [
+  { key: "בוקר", from: 8, to: 13, label: "בוקר (08:00–13:00)" },
+  { key: "צהריים", from: 13, to: 17, label: "צהריים (13:00–17:00)" },
+  { key: "ערב", from: 17, to: 21, label: "ערב (17:00–21:00)" },
+];
+
+function parseStamp(ts) {
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/.exec(ts || "");
+  return m ? new window.Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) : null;
+}
+
+// "בוקר" | "צהריים" | "ערב", or null for a time outside 08:00–21:00.
+function visitWindowOf(ts) {
+  const d = parseStamp(ts);
+  if (!d) return null;
+  const h = d.getHours();
+  const w = VISIT_WINDOWS.find((x) => h >= x.from && h < x.to);
+  if (w) return w.key;
+  return h === 21 && d.getMinutes() === 0 ? "ערב" : null;
+}
+
+// When may the next visit happen? Next calendar day or later, inside a window
+// that has not been used yet. Returns null when the last visit can't be parsed
+// (the caller then keeps the old "next calendar day" rule).
+function nextVisitGate(order, nowMs) {
+  const attempts = order.attempts || [];
+  const last = attempts[attempts.length - 1];
+  const lastDate = last && parseStamp(last.timestamp);
+  if (!lastDate) return null;
+  const done = attempts.filter((a) => a.type === "אין מענה").map((a) => ({ ts: a.timestamp, win: visitWindowOf(a.timestamp) }));
+  const used = done.map((d) => d.win).filter(Boolean);
+  let allowed = VISIT_WINDOWS.filter((w) => !used.includes(w.key));
+  if (!allowed.length) allowed = VISIT_WINDOWS;
+  for (let off = 1; off <= 14; off += 1) {
+    const y = lastDate.getFullYear();
+    const mo = lastDate.getMonth();
+    const d0 = lastDate.getDate() + off;
+    for (const w of allowed) {
+      const start = new window.Date(y, mo, d0, w.from, 0, 0).getTime();
+      const end = new window.Date(y, mo, d0, w.to, 0, 0).getTime();
+      if (end > nowMs) {
+        return { open: start <= nowMs, opensAt: Math.max(start, nowMs), windowStart: start, window: w, allowed, done };
+      }
+    }
+  }
+  return null;
+}
+
+// "מחר" / "היום" / dd/mm for the day a window opens.
+function gateDayWord(startMs, nowMs) {
+  const a = new window.Date(startMs);
+  const b = new window.Date(nowMs);
+  const diff = Math.round(
+    (new window.Date(a.getFullYear(), a.getMonth(), a.getDate()) - new window.Date(b.getFullYear(), b.getMonth(), b.getDate())) / 86400000
+  );
+  if (diff <= 0) return "היום";
+  if (diff === 1) return "מחר";
+  return `ב-${pad(a.getDate())}/${pad(a.getMonth() + 1)}`;
+}
+
 function monthLabel(monthKey) {
   const [y, m] = (monthKey || "").split("-").map(Number);
   if (!y || !m) return monthKey;
@@ -1236,7 +1298,7 @@ function calcOrderEarnings(order, pricing, monthKey = null) {
   let paidSoFar = 0;
   let stopped = false;
   const allVisits = [];
-  order.attempts.forEach((a, i) => {
+  effectiveAttempts(order).forEach((a, i) => {
     // Nothing is paid after the order has been completed.
     if (stopped) {
       allVisits.push({ attempt: a, visitNo: i + 1, pay: 0, kind: "visit" });
@@ -1283,7 +1345,7 @@ function calcOrderMargin(order, pricing) {
   const price = calcClientPrice(order);
   const earnings = calcOrderEarnings(order, pricing);
   const cap = earnings.rates.perCompleted;
-  const finished = isTerminalOrder(order);
+  const finished = isOrderCompleted(order);
   const courierCost = finished ? Math.min(earnings.total, cap) : Math.max(earnings.total, cap);
   const margin = price.total - courierCost;
   return {
@@ -1357,6 +1419,29 @@ function genId(prefix) {
 // affidavit for the courier to sign.
 function isTerminalOrder(o) {
   return o.status === STATUS.DELIVERED || o.status === STATUS.POSTED || o.status === STATUS.REFUSED;
+}
+
+// ONE definition of "this delivery is finished" used by every screen: a final
+// status (Hebrew or English), a signed affidavit, a courier signature or the
+// explicit completed / closed flags.
+const COMPLETED_STATUS_WORDS = new window.Set([
+  "delivered", "נמסר", "completed", "הושלם", "pasted", "posted", "הודבק", "הדבקה", "refused", "סורב", "סירוב",
+]);
+function isOrderCompleted(o) {
+  if (!o) return false;
+  if (isTerminalOrder(o) || COMPLETED_STATUS_WORDS.has(o.status)) return true;
+  return !!(o.completed === true || o.taskClosed || o.affidavitSigned || o.courierSignature || isAffidavitSigned(o));
+}
+
+// The visits used for pay / counts. A finished order always counts at least
+// one completing visit, even if its visit rows were never saved.
+function effectiveAttempts(order) {
+  const real = (order && order.attempts) || [];
+  const isCompletion = (a) => a.type === STATUS.DELIVERED || a.type === STATUS.POSTED || a.type === STATUS.REFUSED;
+  if (!isOrderCompleted(order) || real.some(isCompletion)) return real;
+  const ts =
+    order.completedAt || (order.affidavit && order.affidavit.signedAt) || order.lastVisitAt || order.createdAt || "";
+  return [...real, { type: isTerminalOrder(order) ? order.status : STATUS.DELIVERED, timestamp: ts, synthetic: true }];
 }
 
 // A law firm may cancel an order only while NO courier has been assigned
@@ -2700,7 +2785,7 @@ function EvidenceThumb({ src, label, name }) {
 // signature and the courier's signed affidavit.
 function OrderHistoryList({ orders, onOpenAffidavit }) {
   const rows = orders
-    .filter((o) => (o.attempts || []).length > 0 || o.status === "בוטל")
+    .filter((o) => isOrderCompleted(o))
     .slice()
     .sort((a, b) => String(b.id).localeCompare(String(a.id), "he", { numeric: true }));
   if (!rows.length) {
@@ -2768,6 +2853,101 @@ function OrderHistoryList({ orders, onOpenAffidavit }) {
   );
 }
 
+// "ריכוז חודשים": every month of the courier's work as its own card; opening
+// one shows its totals and the itemised pay per task.
+function CourierMonthlyEarnings({ orders, pricing, currentMonthKey }) {
+  const [selected, setSelected] = useState(currentMonthKey);
+  const months = useMemo(() => {
+    const keys = new window.Set([currentMonthKey]);
+    orders.forEach((o) => effectiveAttempts(o).forEach((a) => monthKeyOf(a.timestamp) && keys.add(monthKeyOf(a.timestamp))));
+    return Array.from(keys)
+      .sort()
+      .reverse()
+      .map((mk) => {
+        const rows = orders
+          .map((o) => ({ o, calc: calcOrderEarnings(o, pricing, mk) }))
+          .filter((r) => r.calc.visits > 0)
+          .sort((x, y) => String(y.o.id).localeCompare(String(x.o.id), "he", { numeric: true }));
+        return {
+          mk,
+          rows,
+          tasks: rows.length,
+          completed: rows.reduce((n, r) => n + r.calc.completed, 0),
+          visits: rows.reduce((n, r) => n + r.calc.visits, 0),
+          pay: rows.reduce((n, r) => n + r.calc.total, 0),
+        };
+      });
+  }, [orders, pricing, currentMonthKey]);
+  const fmtDate = (ts) => {
+    const d = (ts || "").slice(0, 10).split("-");
+    return d.length === 3 ? `${d[2]}/${d[1]}/${d[0]}` : "";
+  };
+  return (
+    <div className="rounded-2xl border border-slate-200/60 bg-white p-4">
+      <SectionHeading title="ריכוז חודשים — כל חודש בנפרד" subtitle="לחצו על חודש לפירוט המשימות והשכר" icon={Wallet} />
+      <div className="mt-3 space-y-2">
+        {months.map((m) => {
+          const open = selected === m.mk;
+          return (
+            <div key={m.mk} className={`rounded-xl border ${open ? "border-indigo-300 bg-indigo-50/40" : "border-slate-100"}`}>
+              <button
+                type="button"
+                onClick={() => setSelected(open ? null : m.mk)}
+                aria-expanded={open}
+                className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-right"
+              >
+                <span>
+                  <span className="block text-sm font-bold text-slate-800">{monthLabel(m.mk)}</span>
+                  <span className="block text-[11px] text-slate-500">
+                    {m.tasks} משימות · {m.visits} ביקורים
+                  </span>
+                </span>
+                <span className="text-base font-extrabold text-indigo-700">{formatILS(m.pay)}</span>
+              </button>
+              {open && (
+                <div className="space-y-3 border-t border-indigo-100 px-3 py-3">
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    {[
+                      { v: formatILS(m.pay), l: 'סה"כ שכר לחודש' },
+                      { v: m.completed, l: "משימות שהושלמו" },
+                      { v: m.visits, l: 'סה"כ ביקורים' },
+                    ].map((b) => (
+                      <div key={b.l} className="rounded-lg bg-white p-2 ring-1 ring-inset ring-slate-100">
+                        <p className="text-lg font-extrabold text-indigo-700">{b.v}</p>
+                        <p className="text-[10px] text-slate-400">{b.l}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs font-semibold text-slate-600">פירוט שכר לפי משימה בחודש זה</p>
+                  {m.rows.length === 0 && <p className="py-2 text-center text-xs text-slate-400">אין פעילות בחודש זה</p>}
+                  {m.rows.map(({ o, calc }) => {
+                    const last = calc.perVisit[calc.perVisit.length - 1];
+                    return (
+                      <div key={o.id} className="flex items-start justify-between gap-2 rounded-lg bg-white p-2.5 text-sm ring-1 ring-inset ring-slate-100">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-slate-700">{o.id}</p>
+                          <p className="truncate text-xs text-slate-500">
+                            {o.recipientName} · {o.street} {o.houseNumber}, {o.city}
+                          </p>
+                          <p className="mt-0.5 text-[11px] text-slate-500">
+                            {calc.visits} ביקורים · {isOrderCompleted(o) ? o.status : "בטיפול"}
+                            {last ? ` · ${fmtDate(last.attempt.timestamp)}` : ""}
+                          </p>
+                        </div>
+                        <p className="shrink-0 font-bold text-indigo-700">{formatILS(calc.total)}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notifications = [], onReadNotification, lockedLawyer = null }) {
   const [tab, setTab] = useState("status");
   const [query, setQuery] = useState("");
@@ -2790,13 +2970,15 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notificat
     [orders, currentLawyer, lockedLawyer]
   );
 
+  // "סטטוס" shows only active orders; finished ones move to "היסטוריה".
+  const activeMyOrders = useMemo(() => myOrders.filter((o) => !isOrderCompleted(o)), [myOrders]);
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return myOrders;
-    return myOrders.filter(
+    if (!q) return activeMyOrders;
+    return activeMyOrders.filter(
       (o) => o.recipientName.toLowerCase().includes(q) || o.id.toLowerCase().includes(q)
     );
-  }, [myOrders, query]);
+  }, [activeMyOrders, query]);
 
   // Details / affidavit are always resolved from THIS lawyer's own orders
   // (and live, so they refresh the moment a courier submits) — an id that
@@ -3493,10 +3675,10 @@ function PhotoUpload({ label, onCaptured, invalid }) {
           }`}
         >
           <Camera className="h-5 w-5" />
-          לחצו לצילום תמונה / וידאו
+          לחצו לצילום תמונה
           <input
             type="file"
-            accept="image/*,video/*"
+            accept="image/*"
             capture="environment"
             className="hidden"
             onChange={handleChange}
@@ -3995,7 +4177,13 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
   }, []);
 
   const today = dayKeyOf(nowStamp(0));
-  const lockedToday = !!lastAttempt && dayKeyOf(lastAttempt.timestamp) === today;
+  // Legal windows: next visit = a later calendar day AND an unused window.
+  const gate = useMemo(
+    () => (lastAttempt ? nextVisitGate(order, clockTick) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [order.attempts, clockTick]
+  );
+  const lockedToday = gate ? !gate.open : !!lastAttempt && dayKeyOf(lastAttempt.timestamp) === today;
 
   // Right after a "no answer" visit is logged, jump to this card and flash
   // the next-visit banner (with its countdown + explanation) for a few seconds.
@@ -4022,12 +4210,14 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
   const countdownLabel = useMemo(() => {
     const now = new window.Date(clockTick);
     const nextMidnight = new window.Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
-    const totalSeconds = Math.max(0, Math.floor((nextMidnight.getTime() - now.getTime()) / 1000));
+    // Counts down to the real start of the next legal window (falls back to midnight).
+    const target = gate && !gate.open ? gate.windowStart : nextMidnight.getTime();
+    const totalSeconds = Math.max(0, Math.floor((target - now.getTime()) / 1000));
     const h = pad(Math.floor(totalSeconds / 3600));
     const m = pad(Math.floor((totalSeconds % 3600) / 60));
     const s = pad(totalSeconds % 60);
     return `${h}:${m}:${s}`;
-  }, [clockTick]);
+  }, [clockTick, gate]);
 
   // Browser push notification: prompt once (per card) for permission while
   // the task is locked, then fire a single system notification — with a
@@ -4168,12 +4358,24 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
             spotlight ? "animate-pulse ring-2 ring-orange-400" : ""
           }`}
         >
-          <p className="text-sm font-bold text-orange-800">⏳ ביקור {attemptsCount + 1} — יתאפשר מחר</p>
-          <div className="flex items-center gap-1.5">
-            <Lock className="h-3.5 w-3.5 shrink-0" />
-            בוצע ביקור היום ({timeOfDay(lastAttempt?.timestamp)}) — לפי תקנות סדר הדין האזרחי, ביקור נוסף יתאפשר רק
-            מחר, בשעה אחרת ביום.
+          <p className="text-sm font-bold text-orange-800">
+            ⏳ ביקור {attemptsCount + 1} — {gate ? gateDayWord(gate.windowStart, clockTick) : "יתאפשר מחר"}
+          </p>
+          <div className="flex items-start gap-1.5">
+            <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              {gate && gate.done.length
+                ? gate.done.map((d, i) => `בוצע ביקור ${i + 1} (${d.win || "מחוץ לחלונות"})`).join(" · ")
+                : `בוצע ביקור היום (${timeOfDay(lastAttempt?.timestamp)})`}
+              {" — "}לפי תקנות סדר הדין האזרחי, ביקור נוסף ייעשה ביום קלנדרי אחר ובחלון זמן שטרם נוצל.
+            </span>
           </div>
+          {gate && (
+            <p>
+              חלונות מותרים לביקור {attemptsCount + 1} {gateDayWord(gate.windowStart, clockTick)}:{" "}
+              {gate.allowed.map((w) => w.label).join(" או ")}
+            </p>
+          )}
           <div className="flex items-center gap-1.5 text-base font-bold text-orange-700">
             <Clock className="h-4 w-4 shrink-0" />
             <span>הביקור הבא יתאפשר בעוד: {countdownLabel} שעות</span>
@@ -4488,13 +4690,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
   // once an order reaches a terminal state (delivered, posted on the door, or
   // a documented refusal), the service is legally complete and it drops off
   // the active task list, whichever courier is currently selected.
-  const activeOrders = orders.filter(
-    (o) =>
-      o.assignedCourier === currentCourier &&
-      o.status !== STATUS.DELIVERED &&
-      o.status !== STATUS.POSTED &&
-      o.status !== STATUS.REFUSED
-  );
+  const activeOrders = orders.filter((o) => o.assignedCourier === currentCourier && !isOrderCompleted(o));
 
   const handleAction = (order, type) => {
     setActiveOrder(order);
@@ -4504,7 +4700,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
   const currentMonthKey = monthKeyOf(nowStamp(0));
   const myOrders = orders.filter((o) => o.assignedCourier === currentCourier);
   const myOrdersThisMonth = myOrders.filter((o) =>
-    o.attempts.some((a) => monthKeyOf(a.timestamp) === currentMonthKey)
+    effectiveAttempts(o).some((a) => monthKeyOf(a.timestamp) === currentMonthKey)
   );
   const myEarnings = myOrders.reduce(
     (acc, o) => {
@@ -4618,14 +4814,14 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
   }));
   // "משימות שבוצעו": every finished order of this courier, newest first.
   const completedOrders = myOrders
-    .filter(isTerminalOrder)
+    .filter(isOrderCompleted)
     .sort((a, b) => {
       const ta = (a.attempts[a.attempts.length - 1] || {}).timestamp || "";
       const tb = (b.attempts[b.attempts.length - 1] || {}).timestamp || "";
       return tb.localeCompare(ta);
     });
-  const completedRows = earningRows.filter((r) => isTerminalOrder(r.order));
-  const inProgressRows = earningRows.filter((r) => !isTerminalOrder(r.order) && r.calc.visits > 0);
+  const completedRows = earningRows.filter((r) => isOrderCompleted(r.order));
+  const inProgressRows = earningRows.filter((r) => !isOrderCompleted(r.order) && r.calc.visits > 0);
   const visibleRows =
     earningsFilter === "visits" ? inProgressRows : earningsFilter === "completed" ? completedRows : earningRows;
   const visibleTotal = visibleRows.reduce((sum, r) => sum + r.calc.total, 0);
@@ -4836,6 +5032,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
 
       {tab === "earnings" && (
         <div className="space-y-4">
+          <CourierMonthlyEarnings orders={myOrders} pricing={pricing} currentMonthKey={currentMonthKey} />
           <div className="rounded-2xl border border-slate-200/60 bg-white p-4">
             <div className="mb-1 flex items-start justify-between">
               <SectionHeading title="ההכנסות שלי" subtitle={monthLabel(currentMonthKey)} icon={Wallet} />
@@ -4918,8 +5115,8 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
             </div>
             <div className="space-y-2">
               {visibleRows.map(({ order: o, calc }) => {
-                const done = isTerminalOrder(o);
-                const last = o.attempts[o.attempts.length - 1];
+                const done = isOrderCompleted(o);
+                const last = effectiveAttempts(o)[effectiveAttempts(o).length - 1];
                 const custom = o.priceOverride?.perAttempt != null || o.priceOverride?.perCompleted != null;
                 return (
                   <div key={o.id} className="rounded-lg border border-slate-100 p-3 text-sm">
@@ -6414,7 +6611,9 @@ function AdminDashboard({
   useEffect(() => {
     if (!assignOrderId) return undefined;
     setDashTab("overview");
-    setActiveFilter(null);
+    // Tap on the phone banner -> the "ממתינות לשיבוץ" view, order highlighted.
+    const target = orders.find((x) => x.id === assignOrderId);
+    setActiveFilter(!target || target.status === STATUS.PENDING ? STATUS.PENDING : null);
     const t = setTimeout(() => {
       const el = window.document.getElementById(`order-row-${assignOrderId}`);
       if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -6429,7 +6628,9 @@ function AdminDashboard({
 
   const counts = useMemo(() => {
     return {
-      total: orders.filter((o) => o.status !== STATUS.CANCELED).length,
+      // Active only: a finished delivery leaves this count at once and shows
+      // up under "הושלמו בהצלחה".
+      active: orders.filter((o) => !isOrderCompleted(o) && o.status !== STATUS.CANCELED && o.status !== "בוטל").length,
       canceled: orders.filter((o) => o.status === STATUS.CANCELED).length,
       pending: orders.filter((o) => o.status === STATUS.PENDING).length,
       // "בטיפול" includes orders waiting on tomorrow's visit (locked today
@@ -6442,22 +6643,22 @@ function AdminDashboard({
       // a signed delivery as well as a door-posting after 3 failed visits —
       // so a completed "הדבקה" task actually leaves the courier's active list
       // and shows up here instead of staying stuck in limbo.
-      delivered: orders.filter((o) => o.status === STATUS.DELIVERED || o.status === STATUS.POSTED).length,
+      delivered: orders.filter((o) => isOrderCompleted(o) && o.status !== STATUS.REFUSED && o.status !== STATUS.CANCELED).length,
       needsAttention: orders.filter((o) => o.status === STATUS.REFUSED).length,
     };
   }, [orders]);
 
   const cards = [
-    { key: "all", label: 'סה"כ מסירות', value: counts.total, icon: FileText, accent: "bg-slate-500", match: (o) => o.status !== STATUS.CANCELED },
+    { key: "all", label: "מסירות פעילות", value: counts.active, icon: FileText, accent: "bg-slate-500", match: (o) => !isOrderCompleted(o) && o.status !== STATUS.CANCELED && o.status !== "בוטל" },
     { key: STATUS.PENDING, label: "ממתינות לשיבוץ", value: counts.pending, icon: Clock, accent: "bg-amber-500", match: (o) => o.status === STATUS.PENDING },
     { key: STATUS.IN_PROGRESS, label: "בטיפול", value: counts.inProgress, icon: Truck, accent: "bg-blue-500", match: (o) => o.status === STATUS.IN_PROGRESS || o.status === STATUS.PENDING_NEXT_VISIT },
-    { key: "completed", label: "הושלמו בהצלחה", value: counts.delivered, icon: BadgeCheck, accent: "bg-emerald-500", match: (o) => o.status === STATUS.DELIVERED || o.status === STATUS.POSTED },
+    { key: "completed", label: "הושלמו בהצלחה", value: counts.delivered, icon: BadgeCheck, accent: "bg-emerald-500", match: (o) => isOrderCompleted(o) && o.status !== STATUS.REFUSED && o.status !== STATUS.CANCELED },
     { key: "attention", label: "דורשות טיפול", value: counts.needsAttention, icon: CircleAlert, accent: "bg-rose-500", match: (o) => o.status === STATUS.REFUSED },
     { key: "canceled", label: "בוטלו", value: counts.canceled, icon: X, accent: "bg-slate-400", match: (o) => o.status === STATUS.CANCELED },
   ];
 
   const filteredOrders = useMemo(() => {
-    if (!activeFilter) return orders.filter((o) => o.status !== STATUS.CANCELED);
+    if (!activeFilter) return orders.filter((o) => !isOrderCompleted(o) && o.status !== STATUS.CANCELED && o.status !== "בוטל");
     const card = cards.find((c) => c.key === activeFilter);
     return orders.filter(card ? card.match : () => true);
   }, [orders, activeFilter]);
@@ -6591,7 +6792,7 @@ function AdminDashboard({
           </p>
         </div>
       )}
-      {onTestNotify && (
+      {onTestNotify && notifyPermission !== "granted" && (
         <button
           type="button"
           onClick={onTestNotify}
@@ -6614,13 +6815,13 @@ function AdminDashboard({
         ))}
       </div>
 
-      <MarginSummary orders={filteredOrders} pricing={pricing} />
+      {activeFilter === "completed" && <MarginSummary orders={filteredOrders} pricing={pricing} />}
 
       <div className="rounded-2xl border border-slate-200/60 bg-white p-5 sm:p-6">
         <div className="mb-4 flex items-center justify-between">
           <SectionHeading
             title="מסירות לפי עיר"
-            subtitle={activeFilter ? `מסונן לפי: ${cards.find((c) => c.key === activeFilter)?.label}` : "כל המסירות"}
+            subtitle={activeFilter ? `מסונן לפי: ${cards.find((c) => c.key === activeFilter)?.label}` : "מסירות פעילות"}
             icon={Filter}
           />
           {activeFilter && (
@@ -7028,8 +7229,8 @@ async function showNewOrderNotification(order) {
   const reg = await registerServiceWorker();
   if (!reg) return;
   const address = [`${order.street || ""} ${order.houseNumber || ""}`.trim(), order.city].filter(Boolean).join(", ");
-  reg.showNotification("📦 מסירה חדשה (אבא תודה)", {
-    body: `לקוח: ${order.submittedBy || "—"}\nנמען: ${order.recipientName || "—"}\nכתובת: ${address || "—"}\nלחץ כאן לשיבוץ שליח מיידי 🛵`,
+  reg.showNotification("מסירות משפטיות — מסירה חדשה ממתינה לשיבוץ", {
+    body: `מסירה חדשה (#${order.id}) מאת ${order.submittedBy || "—"} לכתובת ${address || "—"} ממתינה לשיבוץ שליח`,
     tag: `new-order-${order.id}`,
     dir: "rtl",
     lang: "he",
@@ -7190,25 +7391,71 @@ const uploadCache = new window.Map();
 async function uploadEvidence(path, value) {
   if (typeof value !== "string" || !(value.startsWith("data:") || value.startsWith("blob:"))) return value || null;
   if (uploadCache.has(value)) return uploadCache.get(value);
-  const blob = await (await fetch(value)).blob();
-  const type = (blob.type || "").split(";")[0];
-  const fullPath = `${path}-${window.Date.now().toString(36)}.${MIME_EXT[type] || "bin"}`;
-  const { error } = await supabase.storage
-    .from(EVIDENCE_BUCKET)
-    .upload(fullPath, blob, { contentType: type || undefined, upsert: false });
-  if (error) throw error;
-  const { data } = supabase.storage.from(EVIDENCE_BUCKET).getPublicUrl(fullPath);
-  uploadCache.set(value, data.publicUrl);
-  return data.publicUrl;
+  let type = "";
+  try {
+    const blob = await (await fetch(value)).blob();
+    type = (blob.type || "").split(";")[0];
+    const fullPath = `${path}-${window.Date.now().toString(36)}.${MIME_EXT[type] || "bin"}`;
+    const { error } = await supabase.storage
+      .from(EVIDENCE_BUCKET)
+      .upload(fullPath, blob, { contentType: type || undefined, upsert: false });
+    if (error) throw error;
+    const { data } = supabase.storage.from(EVIDENCE_BUCKET).getPublicUrl(fullPath);
+    uploadCache.set(value, data.publicUrl);
+    return data.publicUrl;
+  } catch (e) {
+    // A storage failure (size limit, 400, network) must NEVER abort saving the
+    // visit. Images fall back to a tiny inline copy (900 px, JPEG 0.65, ~60 KB)
+    // stored in the row itself, so the legal evidence is never lost.
+    console.warn("Storage upload failed, using inline fallback:", path, e);
+    let fallback = null;
+    if (!type || type.startsWith("image/")) {
+      const small = await compressDataUrl(value, 900, 0.65).catch(() => null);
+      fallback = typeof small === "string" && small.startsWith("data:image/") ? small : null;
+    }
+    uploadCache.set(value, fallback);
+    return fallback;
+  }
 }
 
 // order object (UI shape) -> database row. Heavy / derived fields are not
 // stored on the order: visits live in their own table, and "last visit" and
 // "posting photo" are recomputed from them when the order is loaded.
+// Light copy of one visit for orders.data.visits (media already uploaded, or
+// the inline fallback). A second, independent record of every visit.
+async function visitMirror(order, a, i) {
+  const base = `${order.id}/visit-${i + 1}`;
+  const [photoUrl, audioUrl, sigUrl] = await Promise.all([
+    a.photo && a.photo.dataUrl ? uploadEvidence(`${base}-photo`, a.photo.dataUrl) : null,
+    typeof a.audio === "string" ? uploadEvidence(`${base}-audio`, a.audio) : null,
+    a.signatureDataUrl ? uploadEvidence(`${base}-signature`, a.signatureDataUrl) : null,
+  ]);
+  return {
+    type: a.type,
+    timestamp: a.timestamp,
+    location: a.location,
+    lat: a.lat ?? null,
+    lng: a.lng ?? null,
+    gpsAccuracy: a.gpsAccuracy ?? null,
+    gpsMissing: !!a.gpsMissing,
+    notes: a.notes || "",
+    courier: a.courier || order.assignedCourier || "",
+    audioRecorded: !!(a.audioRecorded || audioUrl),
+    audit: a.audit || null,
+    photo: photoUrl
+      ? { dataUrl: photoUrl, kind: (a.photo && a.photo.kind) || "image", timestamp: a.photo && a.photo.timestamp, gps: (a.photo && a.photo.gps) ?? null }
+      : null,
+    audio: audioUrl,
+    signatureDataUrl: sigUrl || undefined,
+  };
+}
+
 async function orderToRow(o) {
   /* eslint-disable no-unused-vars */
-  const { attempts, lastVisitAt, lastVisitGps, lastVisitLat, lastVisitLng, lastVisitPhoto, postingPhoto, courierId, lawyerId, ...data } = o;
+  const { attempts, lastVisitAt, lastVisitGps, lastVisitLat, lastVisitLng, lastVisitPhoto, postingPhoto, courierId, lawyerId, visits: _oldMirror, ...data } = o;
   /* eslint-enable no-unused-vars */
+  const real = (attempts || []).filter((a) => !a.synthetic);
+  if (real.length) data.visits = await Promise.all(real.map((a, i) => visitMirror(o, a, i)));
   if (data.affidavit && data.affidavit.signature) {
     data.affidavit = {
       ...data.affidavit,
@@ -7276,11 +7523,46 @@ function visitFromRow(v) {
 }
 
 function orderFromRow(row, visitRows) {
-  const attempts = visitRows.slice().sort((x, y) => x.seq - y.seq).map(visitFromRow);
+  const { visits: mirror = [], ...rowData } = row.data || {};
+  const fromTable = visitRows.slice().sort((x, y) => x.seq - y.seq).map(visitFromRow);
+  // Merge the visits table with the copy mirrored inside orders.data.visits:
+  // the table wins, but a missing photo / signature / audio is filled from the mirror.
+  const merged = [];
+  const n = Math.max(fromTable.length, Array.isArray(mirror) ? mirror.length : 0);
+  for (let i = 0; i < n; i += 1) {
+    const t = fromTable[i];
+    const m = (Array.isArray(mirror) && mirror[i]) || null;
+    merged.push(
+      t && m
+        ? { ...m, ...t, photo: t.photo || m.photo || null, audio: t.audio || m.audio || null, signatureDataUrl: t.signatureDataUrl || m.signatureDataUrl, audit: t.audit || m.audit || null }
+        : t || m
+    );
+  }
+  const attempts = merged;
+  // A finished order must never show an empty visit history: if no visit was
+  // saved at all, record the completion itself as the visit.
+  const draft = { ...rowData, status: row.status };
+  if (!attempts.length && isOrderCompleted(draft)) {
+    attempts.push({
+      type: isTerminalOrder(draft) ? row.status : STATUS.DELIVERED,
+      timestamp: rowData.completedAt || (rowData.affidavit && rowData.affidavit.signedAt) || "",
+      location: "לא נקלט GPS",
+      lat: null,
+      lng: null,
+      gpsMissing: true,
+      notes: "נרשם אוטומטית מהשלמת המשימה (פרטי הביקור לא נשמרו במלואם)",
+      courier: rowData.assignedCourier || "",
+      photo: null,
+      audio: null,
+      audioRecorded: false,
+      signatureDataUrl: typeof rowData.signature === "string" && rowData.signature !== "SIGNED" ? rowData.signature : undefined,
+      synthetic: true,
+    });
+  }
   const last = attempts[attempts.length - 1];
   const posted = attempts.slice().reverse().find((a) => a.type === STATUS.POSTED);
   return {
-    ...row.data,
+    ...rowData,
     id: row.id,
     status: row.status,
     city: row.city,
