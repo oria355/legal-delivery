@@ -24,3 +24,28 @@ self.addEventListener("notificationclick", (event) => {
     })()
   );
 });
+
+// Optional server Web Push (future): same WhatsApp-style banner from a JSON payload
+// { orderId, client, address }. Not used by the in-app notifications above.
+self.addEventListener("push", (event) => {
+  let p = {};
+  try {
+    p = event.data ? event.data.json() : {};
+  } catch (e) {
+    /* plain text push */
+  }
+  event.waitUntil(
+    self.registration.showNotification("מסירות משפטיות — מסירה חדשה ממתינה לשיבוץ", {
+      body: `מסירה חדשה (#${p.orderId || ""}) מאת ${p.client || "—"} לכתובת ${p.address || "—"} ממתינה לשיבוץ שליח`,
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+      dir: "rtl",
+      lang: "he",
+      vibrate: [200, 100, 200],
+      requireInteraction: true,
+      actions: [{ action: "assign", title: "שבץ שליח עכשיו" }],
+      tag: `new-order-${p.orderId || "x"}`,
+      data: { orderId: p.orderId, url: `/#assign=${p.orderId || ""}` },
+    })
+  );
+});
