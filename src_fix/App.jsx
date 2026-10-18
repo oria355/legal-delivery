@@ -79,6 +79,46 @@ function useHeebo() {
 /* =========================================================================
    CONSTANTS & MOCK DATA
    ========================================================================= */
+// Delivery tracks (stored in orders.data.deliveryTrack; missing = "legal", so
+// every existing order keeps its exact Regulation-161 behaviour).
+const DELIVERY_TRACKS = {
+  legal: { key: "legal", label: "⚖️ מסירה משפטית (תקנה 161 — עד 3 ביקורים + תצהיר)", badge: "⚖️ מסירה משפטית", tone: "bg-indigo-50 text-indigo-700 ring-indigo-200" },
+  municipal: { key: "municipal", label: "🏛️ מסירה לעיריות ורשויות (מכרזים / התראות / צווים)", badge: "🏛️ מסירה מוסדית/עירייה", tone: "bg-teal-50 text-teal-700 ring-teal-200" },
+  standard: { key: "standard", label: "📦 מסירה רגילה / עסקית לחברות (ביקור יחיד מהיר)", badge: "📦 מסירה רגילה", tone: "bg-slate-100 text-slate-700 ring-slate-200" },
+};
+// Who received the document (Regulation 163(b)) and how residence was verified
+// before posting on the door (Regulation 161(4)(b)(2)).
+const DELIVERED_TO = {
+  self: "הנמען בעצמו",
+  family: "בן משפחה הגר עמו (מעל גיל 18 למראית עין)",
+  authorized: "מורשה לקבלה / מזכירות (בתאגיד/עסק)",
+};
+const RESIDENCE_VERIFY = {
+  door: "שם הנמען מופיע על הדלת / תיבת הדואר / אינטרקום",
+  neighbor: "אומת מול שכן כי הנמען מתגורר בכתובת",
+  business: "אומת מול בית העסק / השומר במקום",
+};
+const MUNICIPAL_DOC_TYPES = ["התראת ארנונה / גבייה", "צו עירוני / הנדסה", "מכתב רשמי / מכרז", "אחר"];
+function trackOf(o) {
+  const t = o && o.deliveryTrack;
+  return t === "municipal" || t === "standard" ? t : "legal";
+}
+// Legal = 3, standard = 1, municipal = the chosen 1 or 3 (default 1).
+function maxVisitsOf(o) {
+  const t = trackOf(o);
+  if (t === "legal") return 3;
+  if (t === "standard") return 1;
+  return Number(o.maxVisits) === 3 ? 3 : 1;
+}
+function isSingleVisit(o) {
+  return maxVisitsOf(o) === 1;
+}
+// Documents with a court-style affidavit: legal orders, and municipal
+// statutory (3-visit) deliveries.
+function usesAffidavit(o) {
+  return trackOf(o) === "legal" || (trackOf(o) === "municipal" && maxVisitsOf(o) === 3);
+}
+
 const DOC_TYPES = [
   "כתב תביעה",
   "הזמנה לדין",
@@ -1093,7 +1133,36 @@ function coordNearCity(city) {
 // down to `maxDim` (never up) and re-encodes as JPEG (white background, so a
 // transparent signature PNG stays readable). Any failure returns the original.
 // A ~8 MB camera photo becomes roughly 150 KB — fast to upload on weak signal.
-function compressDataUrl(src, maxDim = 1280, quality = 0.75) {
+// Burns "date time | lat, lng" and "order id · מסירות משפטיות — תיעוד מבוקר" onto
+// the bottom of the image (dark translucent bar, white text). Never throws: if
+// anything fails the picture is simply left as it is. No GPS -> time only.
+function drawEvidenceStamp(ctx, w, h, stamp) {
+  try {
+    const d = stamp.at instanceof window.Date ? stamp.at : new window.Date();
+    const date = `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    const hasGps = stamp.lat != null && stamp.lng != null;
+    const line1 = hasGps ? `${date}  |  ${stamp.lat}, ${stamp.lng}` : date;
+    const line2 = `${stamp.orderId ? stamp.orderId + " · " : ""}מסירות משפטיות — תיעוד מבוקר`;
+    const fs = Math.max(11, Math.round(w / 42));
+    const barH = Math.round(fs * 3.1);
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.62)";
+    ctx.fillRect(0, h - barH, w, barH);
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `600 ${fs}px Heebo, Arial, sans-serif`;
+    try { ctx.direction = "ltr"; } catch (e) { /* older browsers */ }
+    ctx.fillText(line1, w / 2, h - barH + barH * 0.3, w - 16);
+    try { ctx.direction = "rtl"; } catch (e) { /* older browsers */ }
+    ctx.fillText(line2, w / 2, h - barH + barH * 0.72, w - 16);
+    ctx.restore();
+  } catch (e) {
+    /* the stamp is best-effort */
+  }
+}
+
+function compressDataUrl(src, maxDim = 1280, quality = 0.75, stamp = null) {
   return new Promise((resolve) => {
     const img = new window.Image();
     img.onerror = () => resolve(src);
@@ -1107,6 +1176,7 @@ function compressDataUrl(src, maxDim = 1280, quality = 0.75) {
         ctx.fillStyle = "#ffffff";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        if (stamp) drawEvidenceStamp(ctx, canvas.width, canvas.height, stamp);
         resolve(canvas.toDataURL("image/jpeg", quality));
       } catch (e) {
         resolve(src);
@@ -1116,11 +1186,11 @@ function compressDataUrl(src, maxDim = 1280, quality = 0.75) {
   });
 }
 
-function fileToDataUrl(file, maxDim = 1280, quality = 0.75) {
+function fileToDataUrl(file, maxDim = 1280, quality = 0.75, stamp = null) {
   return new Promise((resolve, reject) => {
     const reader = new window.FileReader();
     reader.onerror = () => reject(reader.error);
-    reader.onload = () => resolve(compressDataUrl(reader.result, maxDim, quality));
+    reader.onload = () => resolve(compressDataUrl(reader.result, maxDim, quality, stamp));
     reader.readAsDataURL(file);
   });
 }
@@ -1489,7 +1559,18 @@ function escHtml(v) {
 //
 // NOTE: the attorney block is pre-filled with the ordering attorney's details
 // but is intentionally left UNSIGNED — only a licensed attorney may verify.
-function buildAffidavitHtml(order) {
+// "המסמך נמסר ל…: שם (קרבה / תפקיד)" — escaped, for the affidavit and certificate.
+function receiverStatement(a) {
+  if (!a || !a.deliveredToType) return "";
+  return `המסמך נמסר ל${escHtml(a.deliveredToType)}${
+    a.receiverName ? `: <strong>${escHtml(a.receiverName)}</strong>${a.receiverRelation ? ` (${escHtml(a.receiverRelation)})` : ""}` : ""
+  }.`;
+}
+
+function buildAffidavitHtml(order, kind) {
+  // Standard / municipal tracks get the official delivery certificate instead
+  // of the court affidavit. Legal orders continue below, unchanged.
+  if (kind === "certificate" || !usesAffidavit(order)) return buildDeliveryCertificateHtml(order);
   const attempts = order.attempts || [];
   const last = attempts[attempts.length - 1];
   const courier = order.courierInfo || lookupCourier(order.assignedCourier);
@@ -1555,9 +1636,9 @@ function buildAffidavitHtml(order) {
 
   let outcome = "טרם הושלמה מסירת המסמך.";
   if (order.status === STATUS.DELIVERED && last) {
-    outcome = `בביקור מס' ${attempts.length} נמסר המסמך לידי הנמען${
-      last.signatureDataUrl ? ", אשר אישר את קבלתו בחתימה דיגיטלית (מצורפת להלן)" : ""
-    }.`;
+    outcome = `בביקור מס' ${attempts.length} נמסר המסמך${last.deliveredToType ? "" : " לידי הנמען"}${
+      last.signatureDataUrl ? ", והמקבל אישר את קבלתו בחתימה דיגיטלית (מצורפת להלן)" : ""
+    }.${last.deliveredToType ? ` ${receiverStatement(last)}` : ""}`;
   } else if (order.status === STATUS.REFUSED && last) {
     outcome = `בביקור מס' ${attempts.length} סירב הנמען לקבל את המסמך. הסירוב תועד בצילום ובהקלטת שמע. ${escHtml(
       last.notes || ""
@@ -1565,7 +1646,13 @@ function buildAffidavitHtml(order) {
   } else if (order.status === STATUS.POSTED && last) {
     outcome = `לאחר ${Math.max(0, attempts.length - 1)} ביקורים קודמים בהם לא נמצא מי שיקבל את המסמך, בביקור מס' ${
       attempts.length
-    } הודבק המסמך על דלת הנמען. ההדבקה תועדה בצילום.`;
+    } הודבק המסמך על דלת הנמען. ההדבקה תועדה בצילום.${
+      last.residenceVerification
+        ? ` לפני ההדבקה אימתתי כי הנמען מתגורר / פועל בכתובת, באמצעות: ${escHtml(last.residenceVerification)}${
+            last.verificationNote ? ` (${escHtml(last.verificationNote)})` : ""
+          }.`
+        : ""
+    }`;
   }
 
   const reportDate = (last && last.timestamp) || order.createdDate;
@@ -1692,20 +1779,126 @@ function buildAffidavitHtml(order) {
 </html>`;
 }
 
+// "אישור מסירה רשמי — מסירות אקספרס": printable proof of delivery for the
+// standard and municipal tracks (no court perjury text).
+function buildDeliveryCertificateHtml(order) {
+  const attempts = effectiveAttempts(order);
+  const real = (order.attempts || []).filter((a) => !a.synthetic);
+  const last = real[real.length - 1] || attempts[attempts.length - 1] || {};
+  const t = DELIVERY_TRACKS[trackOf(order)];
+  const fullAddress = `${order.street || ""} ${order.houseNumber || ""}${order.apartment ? `, דירה ${order.apartment}` : ""}, ${order.city || ""}`;
+  const isAuthority = trackOf(order) === "municipal";
+  const clientName = order.submittedBy || "—";
+  const sig = real.map((a) => a.signatureDataUrl).filter(Boolean).pop() || (typeof order.signature === "string" && order.signature !== "SIGNED" ? order.signature : "");
+  const courierSig = order.affidavit && order.affidavit.signature;
+  const gps = last.lat != null ? `${last.lat}, ${last.lng}` : last.location || "—";
+  const exact = (last.audit && last.audit.capturedAt) || last.timestamp || order.completedAt || "—";
+  const photos = real
+    .filter((a) => a.photo && a.photo.dataUrl && a.photo.kind !== "video")
+    .map((a, i) => `<figure><img src="${a.photo.dataUrl}" alt="תמונת ביקור" /><figcaption>ביקור ${i + 1} · ${escHtml(a.type)} · ${escHtml(a.timestamp)}</figcaption></figure>`)
+    .join("");
+  const row = (k, v) => `<tr><th>${k}</th><td>${v}</td></tr>`;
+  return `<!DOCTYPE html>
+<html lang="he" dir="rtl"><head><meta charset="utf-8" /><title>אישור מסירה ${escHtml(order.id)}</title>
+<style>
+  body { font-family: Heebo, Arial, sans-serif; color:#111827; padding: 28px; max-width: 760px; margin: 0 auto; }
+  h1 { text-align:center; font-size: 22px; margin: 0 0 4px; }
+  .sub { text-align:center; color:#6b7280; margin:0 0 18px; font-size: 13px; }
+  table { width:100%; border-collapse: collapse; }
+  th, td { border:1px solid #d1d5db; padding: 7px 10px; text-align:right; font-size: 13px; vertical-align: top; }
+  th { background:#f3f4f6; width: 30%; }
+  figure { display:inline-block; margin: 8px; text-align:center; }
+  figure img { max-height: 150px; max-width: 220px; border:1px solid #d1d5db; }
+  figcaption { font-size: 11px; color:#6b7280; }
+  .sigs { display:flex; justify-content:space-between; margin-top: 22px; }
+  .sigs img { height: 60px; max-width: 220px; }
+  .foot { margin-top: 18px; font-size: 10.5px; color:#6b7280; text-align:center; }
+</style></head>
+<body>
+  <h1>אישור מסירה רשמי — מסירות אקספרס</h1>
+  <p class="sub">${escHtml(t.badge)} · מס' מסירה ${escHtml(order.id)}</p>
+  <table>
+    ${row("מס' הזמנה", escHtml(order.id))}
+    ${row("סוג מסירה", escHtml(t.badge))}
+    ${row(isAuthority ? "הרשות / הלקוח" : "לקוח", escHtml(isAuthority && order.court ? `${order.court} (${clientName})` : clientName))}
+    ${row("מספר אסמכתא", escHtml(order.caseNumber || "—"))}
+    ${row("נמען", escHtml(order.recipientName || "—"))}
+    ${row("כתובת", escHtml(fullAddress))}
+    ${row("מסמך / חבילה", escHtml(order.docType === "אחר" ? order.customDocType || "אחר" : order.docType || "—"))}
+    ${row("סטטוס מסירה", escHtml(order.status || "—"))}
+    ${row("אופן המסירה", escHtml(last.notes || "—"))}
+    ${last.deliveredToType ? row("נמסר ל", `${escHtml(last.deliveredToType)}${last.receiverName ? ` — ${escHtml(last.receiverName)}${last.receiverRelation ? ` (${escHtml(last.receiverRelation)})` : ""}` : ""}`) : ""}
+    ${row("תאריך ושעה מדויקים", escHtml(exact))}
+    ${row("קואורדינטות GPS", `<span dir="ltr">${escHtml(gps)}</span>`)}
+    ${row("שליח", escHtml(order.assignedCourier || last.courier || "—"))}
+  </table>
+  <h3>תמונות מהביקור</h3>
+  <div>${photos || '<p class="meta">לא צורפו תמונות.</p>'}</div>
+  <div class="sigs">
+    <div><div>חתימת הנמען / מקבל</div>${sig ? `<img src="${sig}" alt="חתימת הנמען" />` : "<div>—</div>"}</div>
+    <div><div>חתימת השליח</div>${courierSig ? `<img src="${courierSig}" alt="חתימת השליח" />` : "<div>טרם נחתם</div>"}${
+      order.affidavit && order.affidavit.signedAt ? `<div style="font-size:11px">נחתם ב-${escHtml(order.affidavit.signedAt)}</div>` : ""
+    }</div>
+  </div>
+  <p class="foot">הופק אוטומטית ממערכת מסירות אקספרס · ${escHtml(nowStamp(0))}</p>
+</body></html>`;
+}
+
 // Triggers a real browser download of the affidavit as a standalone .html
 // file the lawyer/admin can open, print or attach to a court filing —
 // a functional fallback since there's no server generating a signed PDF here.
-function downloadAffidavit(order) {
-  const html = buildAffidavitHtml(order);
+function downloadAffidavit(order, kind) {
+  const html = buildAffidavitHtml(order, kind);
   const blob = new window.Blob([html], { type: "text/html;charset=utf-8" });
   const url = window.URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `תצהיר-מסירה-${order.id}.html`;
+  a.download = `${usesAffidavit(order) && kind !== "certificate" ? "תצהיר-מסירה" : "אישור-מסירה"}-${order.id}.html`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+}
+
+// One-click Excel-friendly CSV (UTF-8 BOM so Hebrew opens cleanly in Excel).
+function exportOrdersCsv(orders, filename = "דוח-מסירות.csv") {
+  const head = ["מס' הזמנה", "תאריך", "מסלול", "לקוח / רשות", "אסמכתא / מס' תיק", "נמען", "כתובת", "עיר", "סטטוס", "מספר ביקורים", "שליח", "מחיר"];
+  const cell = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+  const rows = orders.map((o) => [
+    o.id,
+    o.createdDate || "",
+    DELIVERY_TRACKS[trackOf(o)].badge.replace(/^\S+\s/, ""),
+    trackOf(o) === "municipal" && o.court ? `${o.court} (${o.submittedBy || ""})` : o.submittedBy || "",
+    o.caseNumber || "",
+    o.recipientName || "",
+    `${o.street || ""} ${o.houseNumber || ""}`.trim(),
+    o.city || "",
+    o.status || "",
+    effectiveAttempts(o).length,
+    o.assignedCourier || "",
+    calcClientPrice(o).total,
+  ]);
+  const csv = "\uFEFF" + [head, ...rows].map((r) => r.map(cell).join(",")).join("\r\n");
+  const url = window.URL.createObjectURL(new window.Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+}
+
+function CsvExportButton({ orders, filename }) {
+  return (
+    <button
+      type="button"
+      onClick={() => exportOrdersCsv(orders, filename)}
+      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100"
+    >
+      📥 ייצוא דוח לאקסל (CSV)
+    </button>
+  );
 }
 
 // Cities the demo data is seeded in (all have map coordinates).
@@ -1914,7 +2107,7 @@ function Modal({ open, onClose, title, children, wide }) {
 // Role definitions shared by the top role-switcher and the bottom nav — one
 // source of truth for each role's label, icon and simulated identity.
 const ROLES = {
-  lawyer: { key: "lawyer", label: "עו\"ד / חברה", fullLabel: "פורטל עורכי דין וחברות", icon: Briefcase, personaName: 'עו"ד ישראל ישראלי' },
+  lawyer: { key: "lawyer", label: "עו\"ד / חברה", fullLabel: "פורטל לקוחות — עורכי דין, חברות ורשויות", icon: Briefcase, personaName: 'עו"ד ישראל ישראלי' },
   courier: { key: "courier", label: "שליח", fullLabel: "ממשק שליח", icon: Truck, personaName: "דני כהן" },
   admin: { key: "admin", label: "מנהל", fullLabel: "דשבורד מנהל", icon: BarChart3, personaName: "מנהל המערכת" },
 };
@@ -2187,6 +2380,10 @@ const EMPTY_ORDER_FORM = {
   plaintiff: "",
   defendant: "",
   recipientRole: RECIPIENT_ROLES[0],
+  // Delivery track (legal | municipal | standard)
+  deliveryTrack: "legal",
+  maxVisits: 1,
+  packageDescription: "",
   // Pricing options
   speed: "standard",
   addons: { tracing: false, printing: false },
@@ -2201,6 +2398,17 @@ function NewOrderForm({ onCreate }) {
   const update = (key) => (e) =>
     setForm((f) => ({ ...f, [key]: e.target && "value" in e.target ? e.target.value : e }));
 
+  const track = form.deliveryTrack || "legal";
+  const setTrack = (t) =>
+    setForm((f) => ({
+      ...f,
+      deliveryTrack: t,
+      maxVisits: t === "legal" ? 3 : 1,
+      docType: t === "municipal" ? MUNICIPAL_DOC_TYPES[0] : t === "standard" ? "משלוח עסקי" : DOC_TYPES[0],
+      customDocType: "",
+    }));
+  const docTypeList = track === "municipal" ? MUNICIPAL_DOC_TYPES : DOC_TYPES;
+
   const handleFile = (e) => {
     const f = e.target.files?.[0];
     if (f) {
@@ -2214,7 +2422,7 @@ function NewOrderForm({ onCreate }) {
 
   const submit = (e) => {
     e.preventDefault();
-    if (!form.recipientName || !form.idNumber || !form.phone || !form.street) return;
+    if (!form.recipientName || (track === "legal" && !form.idNumber) || !form.phone || !form.street) return;
     // City must resolve to a known settlement (drives the pricing zone).
     const canonicalCity = normalizeCity(form.city);
     if (!canonicalCity) {
@@ -2226,7 +2434,18 @@ function NewOrderForm({ onCreate }) {
       setPrintingFileError(true);
       return;
     }
-    onCreate({ ...form, city: canonicalCity, urgent: form.speed !== "standard" });
+    const trackFields =
+      track === "standard"
+        ? {
+            // Business delivery: no court / case fields at all.
+            caseNumber: "", court: "", plaintiff: "", defendant: "",
+            docType: (form.packageDescription || "").trim() || "משלוח עסקי",
+            customDocType: "", maxVisits: 1,
+          }
+        : track === "municipal"
+        ? { plaintiff: "", defendant: "", maxVisits: Number(form.maxVisits) === 3 ? 3 : 1 }
+        : { maxVisits: 3 };
+    onCreate({ ...form, ...trackFields, city: canonicalCity, urgent: form.speed !== "standard" });
     setForm(EMPTY_ORDER_FORM);
     setSubmitted(true);
     setTimeout(() => setSubmitted(false), 2500);
@@ -2240,8 +2459,59 @@ function NewOrderForm({ onCreate }) {
         icon={ScrollText}
       />
 
-      <AuditTrailHighlight />
+      <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">סוג המסירה</p>
+      <div className="mb-5 grid grid-cols-1 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="סוג המסירה">
+        {Object.values(DELIVERY_TRACKS).map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            role="radio"
+            aria-checked={track === t.key}
+            onClick={() => setTrack(t.key)}
+            className={`rounded-xl border-2 px-3 py-2.5 text-right text-sm font-semibold transition ${
+              track === t.key ? "border-indigo-600 bg-indigo-50 text-indigo-700" : "border-slate-200 bg-white text-slate-600 hover:border-indigo-300"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
 
+      {track === "legal" && <AuditTrailHighlight />}
+
+      {track === "municipal" && (
+        <>
+          <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">פרטי הרשות</p>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Field label="רשות / עירייה / מחלקה">
+              <input className={inputCls} placeholder="לדוגמה: עיריית חדרה — מחלקת גבייה" value={form.court} onChange={update("court")} />
+            </Field>
+            <Field label="מספר אסמכתא / נכס / התראה">
+              <input className={inputCls} placeholder="מספר אסמכתא" value={form.caseNumber} onChange={update("caseNumber")} />
+            </Field>
+            <Field label="מספר ביקורים נדרש">
+              <select className={inputCls} value={form.maxVisits} onChange={(e) => setForm((f) => ({ ...f, maxVisits: Number(e.target.value) }))}>
+                <option value={1}>ביקור אחד</option>
+                <option value={3}>עד 3 ביקורים</option>
+              </select>
+            </Field>
+          </div>
+        </>
+      )}
+
+      {track === "standard" && (
+        <>
+          <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">פרטי המשלוח</p>
+          <div className="grid grid-cols-1 gap-4">
+            <Field label="תיאור החבילה / המעטפה">
+              <input className={inputCls} placeholder="לדוגמה: מעטפה עם חוזים / חבילה קטנה" value={form.packageDescription} onChange={update("packageDescription")} />
+            </Field>
+          </div>
+        </>
+      )}
+
+      {track === "legal" && (
+      <>
       <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">פרטי התיק</p>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Field label="מספר תיק">
@@ -2285,6 +2555,8 @@ function NewOrderForm({ onCreate }) {
           </div>
         </Field>
       </div>
+      </>
+      )}
 
       <p className="mb-2 mt-6 text-xs font-bold uppercase tracking-wide text-slate-400">פרטי הנמען וכתובת המסירה</p>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -2300,13 +2572,13 @@ function NewOrderForm({ onCreate }) {
             />
           </div>
         </Field>
-        <Field label="מספר תעודת זהות" required>
+        <Field label={track === "legal" ? "מספר תעודת זהות" : "ת.ז. / ח.פ. (לא חובה)"} required={track === "legal"}>
           <input
             className={inputCls}
-            placeholder="9 ספרות"
+            placeholder={track === "legal" ? "9 ספרות" : "אופציונלי"}
             value={form.idNumber}
             onChange={update("idNumber")}
-            required
+            required={track === "legal"}
           />
         </Field>
         <Field label="טלפון" required>
@@ -2397,6 +2669,7 @@ function NewOrderForm({ onCreate }) {
       </div>
 
       <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+        {track !== "standard" && (
         <Field label="סוג מסמך" required>
           <div className="relative">
             <select
@@ -2404,7 +2677,7 @@ function NewOrderForm({ onCreate }) {
               value={form.docType}
               onChange={update("docType")}
             >
-              {DOC_TYPES.map((d) => (
+              {docTypeList.map((d) => (
                 <option key={d} value={d}>
                   {d}
                 </option>
@@ -2421,6 +2694,7 @@ function NewOrderForm({ onCreate }) {
             />
           )}
         </Field>
+        )}
 
         <Field label={form.addons.printing ? "קובץ המסמך להדפסה (PDF) — חובה" : "קובץ המסמך (PDF)"}>
           <label
@@ -2592,6 +2866,18 @@ function AttemptEvidence({ attempt: a, courier }) {
         {(a.courier || courier) && <span>· שליח: {a.courier || courier}</span>}
       </p>
       {a.notes && <p className="mt-1 text-xs text-slate-500">{a.notes}</p>}
+      {a.deliveredToType && (
+        <p className="mt-1 text-xs font-medium text-slate-600">
+          נמסר ל: {a.deliveredToType}
+          {a.receiverName ? ` — ${a.receiverName}${a.receiverRelation ? ` (${a.receiverRelation})` : ""}` : ""}
+        </p>
+      )}
+      {a.residenceVerification && (
+        <p className="mt-1 text-xs font-medium text-slate-600">
+          אימות מגורים: {a.residenceVerification}
+          {a.verificationNote ? ` (${a.verificationNote})` : ""}
+        </p>
+      )}
       <EvidencePhoto photo={a.photo} label={photoLabelFor(a.type)} />
       {a.audio && (
         <audio controls src={a.audio} className="mt-2 h-8 w-full">
@@ -2610,11 +2896,17 @@ function AttemptEvidence({ attempt: a, courier }) {
 }
 
 // Small chips for the order's service speed and advanced services.
+function TrackBadge({ order }) {
+  const t = DELIVERY_TRACKS[trackOf(order)];
+  return <span className={`${PILL} ${t.tone}`}>{t.badge}</span>;
+}
+
 function ServiceChips({ order }) {
   const speed = speedOf(order);
   const addons = order.addons || {};
   return (
     <>
+      <TrackBadge order={order} />
       {speed === "urgent" && (
         <span title="מסירה דחופה — 24-48 שעות" className={`${PILL} bg-amber-50 text-amber-700 ring-amber-200`}>
           <Zap className="h-2.5 w-2.5" /> דחוף
@@ -2709,7 +3001,7 @@ function OrderDetailsModal({ order, onClose, onOpenAffidavit, onCancel, showPric
           )}
         </div>
         <div className="rounded-lg border border-slate-200/60 p-3">
-          <p className="mb-2 text-sm font-semibold text-slate-700">חתימת שליח ותצהיר מוסר</p>
+          <p className="mb-2 text-sm font-semibold text-slate-700">{usesAffidavit(order) ? "חתימת שליח ותצהיר מוסר" : "חתימת שליח ואישור מסירה"}</p>
           {isAffidavitSigned(order) ? (
             <div className="space-y-2">
               <img
@@ -2736,7 +3028,7 @@ function OrderDetailsModal({ order, onClose, onOpenAffidavit, onCancel, showPric
                   onClick={() => downloadAffidavit(order)}
                   className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-100"
                 >
-                  <Download className="h-4 w-4" /> הורדת תצהיר חתום
+                  <Download className="h-4 w-4" /> {usesAffidavit(order) ? "הורדת תצהיר חתום" : "הורדת אישור מסירה"}
                 </button>
               </div>
             </div>
@@ -2809,7 +3101,10 @@ function OrderHistoryList({ orders, onOpenAffidavit }) {
                   {o.id} · {o.docType} · {o.street} {o.houseNumber}, {o.city}
                 </p>
               </div>
-              <StatusBadge status={o.status} />
+              <div className="flex flex-wrap items-center gap-1.5">
+                <TrackBadge order={o} />
+                <StatusBadge status={o.status} />
+              </div>
             </div>
             <div className="mt-3 flex flex-wrap gap-3">
               {visits.map((a, i) => (
@@ -2843,7 +3138,7 @@ function OrderHistoryList({ orders, onOpenAffidavit }) {
                 onClick={() => onOpenAffidavit(o.id)}
                 className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200 hover:bg-indigo-100"
               >
-                <FileText className="h-3.5 w-3.5" /> צפייה בתצהיר החתום
+                <FileText className="h-3.5 w-3.5" /> {usesAffidavit(o) ? "צפייה בתצהיר החתום" : "צפייה באישור המסירה"}
               </button>
             )}
           </section>
@@ -3202,7 +3497,7 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notificat
                               onClick={() => setAffidavitId(o.id)}
                               className="flex items-center gap-1 rounded-md bg-gradient-to-r from-indigo-600 to-blue-600 px-2.5 py-1 text-xs font-medium text-white hover:brightness-110"
                             >
-                              <Download className="h-3.5 w-3.5" /> תצהיר
+                              <Download className="h-3.5 w-3.5" /> {usesAffidavit(o) ? "תצהיר" : "אישור מסירה"}
                             </button>
                           )}
                         </div>
@@ -3222,7 +3517,12 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notificat
           </div>
         )}
 
-        {tab === "history" && <OrderHistoryList orders={myOrders} onOpenAffidavit={setAffidavitId} />}
+        {tab === "history" && (
+          <div className="space-y-3">
+            <CsvExportButton orders={myOrders.filter(isOrderCompleted)} filename="היסטוריית-מסירות.csv" />
+            <OrderHistoryList orders={myOrders} onOpenAffidavit={setAffidavitId} />
+          </div>
+        )}
 
         {tab === "profile" && (
           <ProfileTab role="lawyer" subtitle={`מחובר כ: ${currentLawyer}`} onSwitchRole={onSwitchRole} />
@@ -3646,18 +3946,25 @@ function AudioRecorder({ onRecorded, label = "הקלטת שמע", invalid }) {
 }
 
 /* Photo upload with simulated GPS timestamp */
-function PhotoUpload({ label, onCaptured, invalid }) {
+function PhotoUpload({ label, onCaptured, invalid, getStamp }) {
   const [photo, setPhoto] = useState(null);
 
   const handleChange = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Evidence stamp (time + GPS + order id) burned onto the image itself.
+    let stamp = null;
+    try {
+      stamp = getStamp ? await getStamp() : null;
+    } catch (err) {
+      stamp = null;
+    }
     // `url` is a base64 data URL so the photo can be stored on the order.
     // (The visit's GPS fix is attached to the photo when the visit is saved.)
     // Photos become base64 data URLs; videos are too large to inline, so
     // they are kept as an in-session object URL and flagged kind: "video".
     const isVideo = (file.type || "").startsWith("video/");
-    const url = isVideo ? window.URL.createObjectURL(file) : await fileToDataUrl(file);
+    const url = isVideo ? window.URL.createObjectURL(file) : await fileToDataUrl(file, 1280, 0.75, stamp);
     const meta = { url, kind: isVideo ? "video" : "image", timestamp: nowStamp(0) };
     setPhoto(meta);
     onCaptured && onCaptured(meta);
@@ -3716,6 +4023,16 @@ function PhotoUpload({ label, onCaptured, invalid }) {
 
 function CourierActionModal({ order, actionType, onClose, onComplete }) {
   const [signed, setSigned] = useState(false);
+  // Single-visit tracks: who received it ("recipient" | "secretariat" | "left").
+  const [deliveryMode, setDeliveryMode] = useState("recipient");
+  // Regulation 163(b): who actually received the document (legal / 3-visit).
+  const [deliveredToType, setDeliveredToType] = useState("self");
+  const [receiverName, setReceiverName] = useState("");
+  const [receiverRelation, setReceiverRelation] = useState("");
+  // Regulation 161(4)(b)(2): how residence was verified before door posting.
+  const [residenceVerification, setResidenceVerification] = useState("");
+  const [verificationNote, setVerificationNote] = useState("");
+  const gpsRef = useRef(null);
   const [recipientSig, setRecipientSig] = useState(null);
   const [audioOk, setAudioOk] = useState(false);
   const [photo, setPhoto] = useState(null);
@@ -3746,6 +4063,12 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
   // otherwise one delivery's signature would unlock the next one.
   useEffect(() => {
     setSigned(false);
+    setDeliveryMode("recipient");
+    setDeliveredToType("self");
+    setReceiverName("");
+    setReceiverRelation("");
+    setResidenceVerification("");
+    setVerificationNote("");
     setRecipientSig(null);
     setAudioOk(false);
     setPhoto(null);
@@ -3764,6 +4087,19 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
 
   if (!order || !actionType) return null;
 
+  gpsRef.current = gps;
+  // Stamp for photos: capture time now + the latest GPS fix (a quick extra
+  // read if none yet; time only if GPS is unavailable).
+  const getStamp = async () => {
+    let g = gpsRef.current;
+    if (!(g && g.lat != null)) g = await getGps({ timeout: 2500 });
+    return { orderId: order && order.id, lat: g && g.lat != null ? g.lat : null, lng: g && g.lng != null ? g.lng : null, at: new window.Date() };
+  };
+  const singleVisit = isSingleVisit(order);
+  // Legal / 3-visit deliveries must record WHO received the document.
+  const needsReceiver = actionType === "delivered" && !singleVisit;
+  const receiverOk = !needsReceiver || deliveredToType === "self" || (receiverName.trim() !== "" && receiverRelation.trim() !== "");
+  const noSigNeeded = actionType === "delivered" && singleVisit && deliveryMode === "left";
   const titles = {
     delivered: "אישור מסירה — חתימת נמען",
     refused: "תיעוד סירוב קבלה",
@@ -3785,9 +4121,11 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
     !gpsReady
       ? false
       : actionType === "delivered"
-      ? signed && !!audioOk
+      ? (signed || noSigNeeded) && !!audioOk && receiverOk
       : actionType === "refused"
       ? !!audioOk && !!description.trim()
+      : actionType === "posted"
+      ? !!audioOk && !!residenceVerification
       : !!audioOk;
 
   const complete = async () => {
@@ -3843,7 +4181,24 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
           ? "המעטפה הודבקה על דלת הנמען לאחר 3 ביקורים ללא מענה"
           : actionType === "noanswer"
           ? "לא נענתה הדלת, הביקור הבא יתוזמן"
+          : singleVisit && deliveryMode === "secretariat"
+          ? "נמסר למזכירות / קבלה וחתום"
+          : singleVisit && deliveryMode === "left"
+          ? "הונח בכתובת / בתיבה (ללא חתימה) — מתועד בתמונה, GPS וזמן"
+          : needsReceiver && deliveredToType !== "self"
+          ? `נמסר ל${DELIVERED_TO[deliveredToType]}: ${receiverName.trim()} (${receiverRelation.trim()}) וחתום`
           : "נמסר וחתום על ידי הנמען",
+      ...(actionType === "delivered" && singleVisit ? { deliveryMode } : {}),
+      ...(needsReceiver
+        ? {
+            deliveredToType: DELIVERED_TO[deliveredToType],
+            receiverName: deliveredToType === "self" ? "" : receiverName.trim(),
+            receiverRelation: deliveredToType === "self" ? "" : receiverRelation.trim(),
+          }
+        : {}),
+      ...(actionType === "posted"
+        ? { residenceVerification: RESIDENCE_VERIFY[residenceVerification], verificationNote: verificationNote.trim() }
+        : {}),
       ...(actionType === "delivered" && recipientSig ? { signatureDataUrl: await compressDataUrl(recipientSig) } : {}),
     });
     onClose();
@@ -3929,7 +4284,7 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
             { ok: gps.status === "ok" || allowNoGps, label: "מיקום GPS" },
             { ok: !!photo, label: "תמונה / וידאו" },
             { ok: !!audioOk, label: "הקלטת שמע" },
-            ...(actionType === "delivered" ? [{ ok: signed, label: "חתימת הנמען" }] : []),
+            ...(actionType === "delivered" && !noSigNeeded ? [{ ok: signed, label: "חתימת הנמען" }] : []),
           ].map((it) => (
             <li key={it.label} className={`flex items-center gap-1.5 font-medium ${it.ok ? "text-emerald-600" : "text-slate-400"}`}>
               {it.ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clock className="h-3.5 w-3.5" />} {it.label}
@@ -3954,14 +4309,68 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
 
       {actionType === "delivered" && (
         <div className="space-y-4">
-          <PhotoUpload label="צילום מסירה / וידאו (חובה)" onCaptured={handlePhoto} invalid={photoError && !photo} />
-          <SignaturePad onSave={(dataUrl) => { setRecipientSig(dataUrl); setSigned(true); }} onCancel={onClose} />
+          {needsReceiver && (
+            <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <p className="text-xs font-bold text-slate-600">למי נמסר המסמך? (תקנה 163(ב))</p>
+              <div className="space-y-1.5" role="radiogroup" aria-label="מקבל המסמך">
+                {Object.entries(DELIVERED_TO).map(([k, l]) => (
+                  <label key={k} className="flex cursor-pointer items-start gap-2 text-sm text-slate-700">
+                    <input type="radio" name="deliveredTo" className="mt-1" checked={deliveredToType === k} onChange={() => setDeliveredToType(k)} />
+                    <span>{l}</span>
+                  </label>
+                ))}
+              </div>
+              {deliveredToType !== "self" && (
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <input
+                    className={inputCls}
+                    placeholder={deliveredToType === "authorized" ? "שם המקבל ותפקידו (שם)" : "שם המקבל"}
+                    value={receiverName}
+                    onChange={(e) => setReceiverName(e.target.value)}
+                  />
+                  <input
+                    className={inputCls}
+                    placeholder={deliveredToType === "authorized" ? "תפקיד" : "קרבה לנמען (בן/בת זוג, הורה, בן/בת בגיר/ה)"}
+                    value={receiverRelation}
+                    onChange={(e) => setReceiverRelation(e.target.value)}
+                  />
+                </div>
+              )}
+              {!receiverOk && <p className="text-[11px] font-semibold text-rose-600">יש למלא שם המקבל וקרבה / תפקיד.</p>}
+            </div>
+          )}
+          {singleVisit && (
+            <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="אופן המסירה">
+              {[
+                ["recipient", "נמסר לנמען"],
+                ["secretariat", "נמסר למזכירות / קבלה"],
+                ["left", "הונח בכתובת / תיבה"],
+              ].map(([k, l]) => (
+                <button
+                  key={k}
+                  type="button"
+                  role="radio"
+                  aria-checked={deliveryMode === k}
+                  onClick={() => setDeliveryMode(k)}
+                  className={`rounded-lg border-2 px-3 py-1.5 text-xs font-semibold ${
+                    deliveryMode === k ? "border-emerald-600 bg-emerald-50 text-emerald-700" : "border-slate-200 text-slate-600"
+                  }`}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          )}
+          <PhotoUpload label="צילום מסירה (חובה)" getStamp={getStamp} onCaptured={handlePhoto} invalid={photoError && !photo} />
+          {!noSigNeeded && (
+            <SignaturePad onSave={(dataUrl) => { setRecipientSig(dataUrl); setSigned(true); }} onCancel={onClose} />
+          )}
         </div>
       )}
 
       {actionType === "refused" && (
         <div className="space-y-4">
-          <PhotoUpload label="צילום / וידאו דיסקרטי של הנמען או הדלת (חובה)" onCaptured={handlePhoto} invalid={photoError && !photo} />
+          <PhotoUpload label="צילום / וידאו דיסקרטי של הנמען או הדלת (חובה)" getStamp={getStamp} onCaptured={handlePhoto} invalid={photoError && !photo} />
           <Field label="תיאור פיזי / נסיבות הסירוב" required>
             <textarea
               className={inputCls}
@@ -3983,7 +4392,7 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
               <p className="text-xs text-slate-400">הנקודה והשעה המדויקות יתועדו ברגע השמירה</p>
             </div>
           </div>
-          <PhotoUpload label="צילום / וידאו של הדלת או הכניסה (חובה)" onCaptured={handlePhoto} invalid={photoError && !photo} />
+          <PhotoUpload label="צילום / וידאו של הדלת או הכניסה (חובה)" getStamp={getStamp} onCaptured={handlePhoto} invalid={photoError && !photo} />
         </div>
       )}
 
@@ -3992,7 +4401,22 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
           <div className="rounded-lg bg-amber-50 p-3 text-xs text-amber-700 ring-1 ring-inset ring-amber-200">
             זהו ביקור שלישי ואחרון — יש לצלם את המעטפה כשהיא מודבקת על הדלת בהתאם לתקנות.
           </div>
-          <PhotoUpload label="צילום / וידאו של המעטפה מודבקת על הדלת (חובה)" onCaptured={handlePhoto} invalid={photoError && !photo} />
+          <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <p className="text-xs font-bold text-slate-600">אימות מגורים לפני הדבקה (תקנה 161(4)(ב)(2)) — חובה</p>
+            <div className="space-y-1.5" role="radiogroup" aria-label="אימות מגורים">
+              {Object.entries(RESIDENCE_VERIFY).map(([k, l]) => (
+                <label key={k} className="flex cursor-pointer items-start gap-2 text-sm text-slate-700">
+                  <input type="radio" name="residence" className="mt-1" checked={residenceVerification === k} onChange={() => setResidenceVerification(k)} />
+                  <span>{l}</span>
+                </label>
+              ))}
+            </div>
+            {residenceVerification === "neighbor" && (
+              <input className={inputCls} placeholder="שם השכן / דירה (לא חובה)" value={verificationNote} onChange={(e) => setVerificationNote(e.target.value)} />
+            )}
+            {!residenceVerification && <p className="text-[11px] font-semibold text-rose-600">יש לבחור כיצד אומת שהנמען מתגורר בכתובת.</p>}
+          </div>
+          <PhotoUpload label="צילום / וידאו של המעטפה מודבקת על הדלת (חובה)" getStamp={getStamp} onCaptured={handlePhoto} invalid={photoError && !photo} />
         </div>
       )}
 
@@ -4018,10 +4442,10 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
         </button>
       )}
 
-      {actionType === "delivered" && signed && (
+      {actionType === "delivered" && (signed || noSigNeeded) && (
         <button
           onClick={complete}
-          disabled={submitting || !gpsReady || !audioOk}
+          disabled={submitting || !gpsReady || !audioOk || !receiverOk}
           className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 disabled:opacity-50 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-700"
         >
           {submitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <BadgeCheck className="h-4 w-4" />}
@@ -4183,7 +4607,10 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [order.attempts, clockTick]
   );
-  const lockedToday = gate ? !gate.open : !!lastAttempt && dayKeyOf(lastAttempt.timestamp) === today;
+  // Single-visit tracks (standard / municipal with 1 visit): no 3-visit rule,
+  // no morning / noon / evening lock.
+  const singleVisit = isSingleVisit(order);
+  const lockedToday = singleVisit ? false : gate ? !gate.open : !!lastAttempt && dayKeyOf(lastAttempt.timestamp) === today;
 
   // Right after a "no answer" visit is logged, jump to this card and flash
   // the next-visit banner (with its countdown + explanation) for a few seconds.
@@ -4264,7 +4691,7 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
   // 3rd visit must end in a posting or a successful delivery — this is what
   // stops repeated taps from inflating the visit count (and the payout)
   // past what the legal process allows.
-  const noAnswerLocked = attemptsCount >= 2;
+  const noAnswerLocked = !singleVisit && attemptsCount >= 2;
   const canPost = attemptsCount >= 2;
 
   // Phone lookup is tolerant of whichever field name the order came in
@@ -4320,6 +4747,7 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
         </p>
       )}
       {/* {LEGAL_REFS.serviceRule}: up to three attempts, each on a different day. */}
+      {!singleVisit && (
       <div className="mt-3 rounded-xl bg-slate-50 p-2.5">
         <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold text-slate-500">
           <Gavel className="h-3.5 w-3.5" /> {LEGAL_REFS.serviceRule} — עד 3 ניסיונות מסירה, בימים ובשעות שונים
@@ -4352,6 +4780,7 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
           })}
         </div>
       </div>
+      )}
       {lockedToday && (
         <div
           className={`mt-2.5 space-y-1.5 rounded-lg bg-orange-50 px-2.5 py-2 text-xs font-medium text-orange-700 ring-1 ring-inset ring-orange-200 ${
@@ -4440,11 +4869,12 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
             onClick={() => onAction(order, "noanswer")}
             disabled={lockedToday}
             title={lockedToday ? "בוצע ביקור היום — ניתן לבצע ביקור נוסף רק מחר" : undefined}
-            className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200/60 px-2 py-2.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300"
+            className={`flex items-center justify-center gap-1.5 rounded-lg border border-slate-200/60 px-2 py-2.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300 ${singleVisit ? "col-span-2" : ""}`}
           >
-            <Timer className="h-3.5 w-3.5" /> אין מענה — ביקור {attemptsCount + 1}
+            <Timer className="h-3.5 w-3.5" /> {singleVisit ? "אין מענה" : `אין מענה — ביקור ${attemptsCount + 1}`}
           </button>
         )}
+        {!singleVisit && (
         <button
           onClick={() => onAction(order, "posted")}
           disabled={lockedToday || !canPost}
@@ -4461,6 +4891,7 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
         >
           <DoorClosed className="h-3.5 w-3.5" /> הדבקה — ביקור 3
         </button>
+        )}
       </div>
 
       {pendingRequest ? (
@@ -5000,7 +5431,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
                         </>
                       ) : (
                         <>
-                          <PenTool className="h-3.5 w-3.5" /> הפקת תצהיר וחתימה
+                          <PenTool className="h-3.5 w-3.5" /> {usesAffidavit(o) ? "הפקת תצהיר וחתימה" : "אישור מסירה רשמי"}
                         </>
                       )}
                     </button>
@@ -5195,7 +5626,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
                           </>
                         ) : (
                           <>
-                            <PenTool className="h-3.5 w-3.5" /> הפקת תצהיר וחתימה
+                            <PenTool className="h-3.5 w-3.5" /> {usesAffidavit(o) ? "הפקת תצהיר וחתימה" : "אישור מסירה רשמי"}
                           </>
                         )}
                       </button>
@@ -5287,7 +5718,7 @@ function AffidavitBadge({ order }) {
   if (!isTerminalOrder(order)) return null;
   return isAffidavitSigned(order) ? (
     <span className={`${PILL} bg-emerald-50 text-emerald-700 ring-emerald-200`}>
-      <BadgeCheck className="h-2.5 w-2.5" /> תצהיר נחתם
+      <BadgeCheck className="h-2.5 w-2.5" /> {usesAffidavit(order) ? "תצהיר נחתם" : "אישור נחתם"}
     </span>
   ) : (
     <span className={`${PILL} bg-amber-50 text-amber-700 ring-amber-200`}>
@@ -5307,16 +5738,22 @@ function AffidavitBadge({ order }) {
 //    with print + download.
 function AffidavitModal({ order, onClose, onSign }) {
   const [signing, setSigning] = useState(false);
+  // Municipal 3-visit orders get BOTH documents: the legal affidavit (default) and the certificate.
+  const [docKind, setDocKind] = useState("affidavit");
   const frameRef = useRef(null);
 
   // The modal component stays mounted between orders, so start clean each time.
   useEffect(() => {
     setSigning(false);
+    setDocKind("affidavit");
   }, [order?.id]);
 
   if (!order) return null;
   const signed = isAffidavitSigned(order);
   const canEdit = !!onSign;
+  const asAffidavit = usesAffidavit(order) && docKind === "affidavit";
+  const canToggle = trackOf(order) === "municipal" && usesAffidavit(order);
+  const docWord = asAffidavit ? "תצהיר" : "אישור מסירה";
 
   // Approving in the full-screen signing overlay saves the signature onto the
   // order (the parent updates the shared orders list, so every list, badge and
@@ -5338,11 +5775,29 @@ function AffidavitModal({ order, onClose, onSign }) {
   };
 
   return (
-    <Modal open={!!order} onClose={onClose} title={canEdit ? "הפקת תצהיר וחתימה" : "תצהיר מוסר — תצוגה מקדימה"} wide>
+    <Modal open={!!order} onClose={onClose} title={asAffidavit ? (canEdit ? "הפקת תצהיר וחתימה" : "תצהיר מוסר — תצוגה מקדימה") : (canEdit ? "אישור מסירה רשמי" : "אישור מסירה רשמי — תצוגה מקדימה")} wide>
+      {canToggle && (
+        <div className="mb-3 flex gap-2" role="radiogroup" aria-label="סוג מסמך">
+          {[["affidavit", "תצהיר מוסר משפטי"], ["certificate", "אישור מסירה רשמי"]].map(([k, l]) => (
+            <button
+              key={k}
+              type="button"
+              role="radio"
+              aria-checked={docKind === k}
+              onClick={() => setDocKind(k)}
+              className={`flex-1 rounded-lg border-2 px-3 py-1.5 text-xs font-semibold ${
+                docKind === k ? "border-indigo-600 bg-indigo-50 text-indigo-700" : "border-slate-200 text-slate-600"
+              }`}
+            >
+              {l}
+            </button>
+          ))}
+        </div>
+      )}
       {signed && (
         <div className="mb-3 flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
           <BadgeCheck className="h-4 w-4 shrink-0" />
-          התצהיר נחתם על ידי {order.affidavit.signedBy || order.assignedCourier}
+          ה{docWord} נחתם על ידי {order.affidavit.signedBy || order.assignedCourier}
           {order.affidavit.capturedBy ? ` (נקלט על ידי ${order.affidavit.capturedBy})` : ""} ב-{order.affidavit.signedAt} וזמין
           לצפייה והורדה אצל המנהל ואצל עורך הדין.
         </div>
@@ -5352,13 +5807,13 @@ function AffidavitModal({ order, onClose, onSign }) {
       <iframe
         ref={frameRef}
         title={`תצהיר מוסר ${order.id}`}
-        srcDoc={buildAffidavitHtml(order)}
+        srcDoc={buildAffidavitHtml(order, docKind)}
         className="h-[60vh] w-full rounded-lg border border-slate-200/60 bg-white"
       />
 
       {canEdit && (
         <div className="mt-4">
-          <p className="mb-1 text-xs font-semibold text-slate-500">חתימת השליח על התצהיר</p>
+          <p className="mb-1 text-xs font-semibold text-slate-500">חתימת השליח על ה{docWord}</p>
           {!signed ? (
             <button
               type="button"
@@ -5394,7 +5849,7 @@ function AffidavitModal({ order, onClose, onSign }) {
             </button>
             <button
               type="button"
-              onClick={() => downloadAffidavit(order)}
+              onClick={() => downloadAffidavit(order, docKind)}
               className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100"
             >
               <Download className="h-4 w-4" /> הורדת קובץ
@@ -5405,7 +5860,7 @@ function AffidavitModal({ order, onClose, onSign }) {
 
       <FullScreenSignatureModal
         open={signing}
-        title="חתימת השליח על התצהיר"
+        title={`חתימת השליח על ה${docWord}`}
         subtitle={`${order.id} · ${order.recipientName}`}
         onCancel={() => setSigning(false)}
         onConfirm={handleConfirmSignature}
@@ -6815,6 +7270,9 @@ function AdminDashboard({
         ))}
       </div>
 
+      <div className="flex justify-end">
+        <CsvExportButton orders={filteredOrders} filename="דוח-מסירות-מנהל.csv" />
+      </div>
       {activeFilter === "completed" && <MarginSummary orders={filteredOrders} pricing={pricing} />}
 
       <div className="rounded-2xl border border-slate-200/60 bg-white p-5 sm:p-6">
@@ -6988,7 +7446,7 @@ function AdminDashboard({
                               onClick={() => setAffidavitOrder(o)}
                               className="flex items-center gap-1 rounded-md bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
                             >
-                              <ScrollText className="h-3.5 w-3.5" /> הפקת תצהיר וחתימה
+                              <ScrollText className="h-3.5 w-3.5" /> {usesAffidavit(o) ? "הפקת תצהיר וחתימה" : "אישור מסירה רשמי"}
                             </button>
                           ) : null}
                           </div>
@@ -7442,6 +7900,12 @@ async function visitMirror(order, a, i) {
     courier: a.courier || order.assignedCourier || "",
     audioRecorded: !!(a.audioRecorded || audioUrl),
     audit: a.audit || null,
+    deliveryMode: a.deliveryMode || null,
+    deliveredToType: a.deliveredToType || null,
+    receiverName: a.receiverName || "",
+    receiverRelation: a.receiverRelation || "",
+    residenceVerification: a.residenceVerification || null,
+    verificationNote: a.verificationNote || "",
     photo: photoUrl
       ? { dataUrl: photoUrl, kind: (a.photo && a.photo.kind) || "image", timestamp: a.photo && a.photo.timestamp, gps: (a.photo && a.photo.gps) ?? null }
       : null,
@@ -7500,6 +7964,12 @@ async function visitToRow(order, a, seq, courierId) {
       courier: a.courier || order.assignedCourier || "",
       audioRecorded: !!(a.audioRecorded || audioUrl),
       audit: a.audit || null,
+      deliveryMode: a.deliveryMode || null,
+      deliveredToType: a.deliveredToType || null,
+      receiverName: a.receiverName || "",
+      receiverRelation: a.receiverRelation || "",
+      residenceVerification: a.residenceVerification || null,
+      verificationNote: a.verificationNote || "",
     },
     photo_url: photoUrl,
     photo_meta: a.photo ? { kind: a.photo.kind || "image", timestamp: a.photo.timestamp, gps: a.photo.gps ?? null } : null,
@@ -9474,6 +9944,9 @@ function AppShell({ profile, onSignOut }) {
         plaintiff: form.plaintiff || "",
         defendant: form.defendant || "",
         recipientRole: form.recipientRole || RECIPIENT_ROLES[0],
+        deliveryTrack: form.deliveryTrack || "legal",
+        maxVisits: form.deliveryTrack === "municipal" ? (Number(form.maxVisits) === 3 ? 3 : 1) : form.deliveryTrack === "standard" ? 1 : 3,
+        packageDescription: form.packageDescription || "",
         status: STATUS.PENDING,
         assignedCourier: "",
         createdDate: nowStamp(0),
