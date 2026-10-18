@@ -733,6 +733,40 @@ function zoneForCity(city) {
   return CITY_ZONE_INDEX.get(city) || PRICING_ZONES.find((z) => z.key === "center");
 }
 
+// Upgrade 1 — true geographic region label per city. Prices stay attached to
+// PRICING_ZONES (unchanged); only the *name shown to the user* is derived here,
+// so "צפון / ירושלים / שפלה — ₪210" is shown as exactly one real region.
+const GEO_REGION_LABEL = {
+  north: "אזור הצפון",
+  haifa: "אזור חיפה והקריות",
+  sharon: "אזור השרון וחדרה",
+  center: "אזור המרכז וגוש דן",
+  shfela: "אזור השפלה",
+  jerusalem: "אזור ירושלים והסביבה",
+  south: "אזור הדרום",
+};
+const GEO_JERUSALEM = new window.Set(["ירושלים", "מבשרת ציון", "אבו גוש", "מעלה החמישה", "צור הדסה", "בית שמש", "הראל", "קריית ענבים", "צובה", "נטף", "עין נקובא", "אורה", "עמינדב", "בית זית", "תרום", "מוצא עילית", "עין כרם", "נחם", "צרעה", "אשתאול", "קריית יערים", "נווה אילן", "מודיעין עילית"]);
+const GEO_SHFELA = new window.Set(["רחובות", "נס ציונה", "לוד", "רמלה", "מודיעין-מכבים-רעות", "אשדוד", "יבנה", "גדרה", "קריית עקרון", "מזכרת בתיה", "גן יבנה", "באר יעקב", "נצר סרני", "בית דגן", "צריפין", "יד בנימין", "גזר", "שילת", "חדיד", "בן שמן", "שדה עוזיהו", "נתיב הל\"ה", "בית חנן", "כפר ביל\"ו", "כפר אביב", "עשרת", "בני ראם", "גני יוחנן", "בית עזרא", "בני דרום", "גבעת ברנר", "כפר מנחם", "כפר הנגיד", "כפר אוריה", "נען", "גבעתי", "חפץ חיים", "בית אלעזרי", "פלמחים", "ינון", "יסודות", "גן שורק", "סתריה", "נס הרים", "מסלול", "בית נחמיה", "ברקת", "גנות", "מצליח", "מתתיהו", "לפיד", "חשמונאים", "מבוא מודיעין", "נחשונים", "בית עריף", "בית חילקיה", "חולדה", "כפר בן נון", "נוף איילון", "שעלבים", "זרחיה", "אשקלון", "קריית גת", "קריית מלאכי"].concat(["אשקלון", "קריית גת", "קריית מלאכי"]));
+const GEO_SHARON_FROM_CENTER = new window.Set(["הרצליה", "הרצליה פיתוח", "כפר שמריהו", "גליל ים", "רמת השרון"]);
+function geoRegionOf(city) {
+  const c = normalizeCity(city) || city;
+  const z = CITY_ZONE_INDEX.get(c);
+  if (!z) return null;
+  if (GEO_JERUSALEM.has(c)) return "jerusalem";
+  if (GEO_SHFELA.has(c)) return "shfela";
+  if (z.key === "local" || z.key === "sharon") return "sharon";
+  if (z.key === "haifa") return "haifa";
+  if (z.key === "center") return GEO_SHARON_FROM_CENTER.has(c) ? "sharon" : "center";
+  if (z.key === "south") return "south";
+  return "north";
+}
+// Display label for a city; unknown/legacy cities fall back to the same zone
+// that prices them (Center), so an old order never shows an empty region.
+function zoneLabelFor(city) {
+  const k = geoRegionOf(city);
+  return k ? GEO_REGION_LABEL[k] : GEO_REGION_LABEL.center;
+}
+
 // Service speed — mutually exclusive (one delivery has exactly one speed).
 const SPEED_OPTIONS = [
   { key: "standard", label: "מסירה רגילה", hint: "3-5 ימי עסקים", fee: 0 },
@@ -758,7 +792,7 @@ function calcClientPrice(order) {
   const tracingFee = addons.tracing ? ADDON_OPTIONS[0].fee : 0;
   const printingFee = addons.printing ? ADDON_OPTIONS[1].fee : 0;
   const lines = [
-    { key: "base", label: `מחיר בסיס — ${zone.short}`, amount: zone.price },
+    { key: "base", label: `מחיר בסיס — ${zoneLabelFor(order.city)}`, amount: zone.price },
     ...(speed.fee ? [{ key: "speed", label: `תוספת ${speed.label} (${speed.hint})`, amount: speed.fee }] : []),
     ...(tracingFee ? [{ key: "tracing", label: ADDON_OPTIONS[0].label, amount: tracingFee }] : []),
     ...(printingFee ? [{ key: "printing", label: ADDON_OPTIONS[1].label, amount: printingFee }] : []),
@@ -1142,7 +1176,7 @@ function drawEvidenceStamp(ctx, w, h, stamp) {
     const date = `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
     const hasGps = stamp.lat != null && stamp.lng != null;
     const line1 = hasGps ? `${date}  |  ${stamp.lat}, ${stamp.lng}` : date;
-    const line2 = `${stamp.orderId ? stamp.orderId + " · " : ""}מסירות משפטיות — תיעוד מבוקר`;
+    const line2 = `${stamp.orderId ? formatOrderNum(stamp.orderId, true) + " · " : ""}מסירות משפטיות — תיעוד מבוקר`;
     const fs = Math.max(11, Math.round(w / 42));
     const barH = Math.round(fs * 3.1);
     ctx.save();
@@ -1431,10 +1465,10 @@ function calcOrderMargin(order, pricing) {
 // Text of the Lawyer/Client notification for a completed, signed order.
 function completionNotificationText(o) {
   return o.status === STATUS.DELIVERED
-    ? `הודעה: בוצעה מסירה בהצלחה עבור מס' משימה ${o.id}`
+    ? `הודעה: בוצעה מסירה בהצלחה עבור מס' משימה ${formatOrderNum(o.id, true)}`
     : o.status === STATUS.POSTED
-    ? `הודעה: בוצעה הדבקה על הדלת (ביקור 3) עבור מס' משימה ${o.id}`
-    : `הודעה: תועד סירוב קבלה עבור מס' משימה ${o.id}`;
+    ? `הודעה: בוצעה הדבקה על הדלת (ביקור 3) עבור מס' משימה ${formatOrderNum(o.id, true)}`
+    : `הודעה: תועד סירוב קבלה עבור מס' משימה ${formatOrderNum(o.id, true)}`;
 }
 
 // Green chip shown wherever an order's payout is listed once the order has
@@ -1471,13 +1505,31 @@ function paymentKey(courier, monthKey) {
   return `${courier}__${monthKey}`;
 }
 
-// Demo mode: next clean order number after the highest existing ORD-<n>.
+// Upgrade 4 — display form of an order number. The internal id (what the
+// database stores and every lookup uses) is never changed: "ORD-1003" and
+// "1003" both display as "#1003". `plain` drops the "#" (file names, URLs).
+function orderNumberOf(id) {
+  return String(id == null ? "" : id).replace(/^\s*ORD[-_\s]*/i, "").trim();
+}
+function formatOrderNum(id, plain) {
+  const n = orderNumberOf(id);
+  if (!n) return "";
+  return plain || !/^\d+$/.test(n) ? n : `#${n}`;
+}
+// Cleans free text (notification messages written by the database triggers
+// still contain the raw id): "ORD-1003" -> "#1003".
+function cleanOrderText(text) {
+  return String(text == null ? "" : text).replace(/#?\bORD-(\d+)/gi, "#$1");
+}
+
+// Demo mode: next number = highest existing numeric order number (with or
+// without the legacy "ORD-" prefix) + 1 — "1001", "1002", "1003" …
 function nextDemoOrderId(orders) {
   const max = orders.reduce((m, o) => {
-    const n = /^ORD-(\d+)$/.exec(o.id);
-    return n ? Math.max(m, Number(n[1])) : m;
+    const n = /^\d+$/.test(orderNumberOf(o.id)) ? Number(orderNumberOf(o.id)) : 0;
+    return Math.max(m, n);
   }, 1000);
-  return `ORD-${max + 1}`;
+  return String(max + 1);
 }
 
 function genId(prefix) {
@@ -1519,6 +1571,54 @@ function effectiveAttempts(order) {
 // button disappears — the courier may already be on the way.
 function canCancelOrder(o) {
   return !!o && !o.assignedCourier && o.status === STATUS.PENDING;
+}
+
+// Upgrade 2 — a cancelled order (Hebrew or English status). Cancelled orders
+// never appear in an "active" list; they live only in the Admin "בוטלו" view
+// and the lawyer's collapsible "מסירות שבוטלו" section, where they can be
+// permanently deleted.
+function isOrderCancelled(o) {
+  return !!o && (o.status === "cancelled" || o.status === "canceled" || o.status === STATUS.CANCELED || o.status === "בוטל");
+}
+
+// Hidden-order memory (browser only). Used when the database refuses a delete
+// the user is not allowed to make (a lawyer, before lawyer-actions.sql is
+// installed): the order disappears for that user for good instead of coming
+// back on the next refresh.
+const HIDDEN_ORDERS_KEY = "mesirot.hiddenOrders";
+// Same idea for the lawyer's verification when the database RPC is missing.
+const LAWYER_VERIFY_KEY = "mesirot.lawyerVerifications";
+function readLocalVerifications() {
+  try {
+    return JSON.parse(window.localStorage.getItem(LAWYER_VERIFY_KEY) || "{}") || {};
+  } catch (e) {
+    return {};
+  }
+}
+function rememberLawyerVerification(id, fields) {
+  try {
+    const all = readLocalVerifications();
+    all[id] = fields;
+    window.localStorage.setItem(LAWYER_VERIFY_KEY, JSON.stringify(all));
+  } catch (e) {
+    /* storage full / unavailable — the verification stays in memory only */
+  }
+}
+function readHiddenOrderIds() {
+  try {
+    return new window.Set(JSON.parse(window.localStorage.getItem(HIDDEN_ORDERS_KEY) || "[]"));
+  } catch (e) {
+    return new window.Set();
+  }
+}
+function rememberHiddenOrderId(id) {
+  try {
+    const set = readHiddenOrderIds();
+    set.add(id);
+    window.localStorage.setItem(HIDDEN_ORDERS_KEY, JSON.stringify([...set]));
+  } catch (e) {
+    /* storage unavailable — the order is still removed for this session */
+  }
 }
 
 // The courier's signed affidavit lives on the order itself as
@@ -1567,6 +1667,46 @@ function receiverStatement(a) {
   }.`;
 }
 
+// Upgrade 3 — lawyer verification helpers.
+// "עו"ד ישראל ישראלי" / "עו״ד ישראל ישראלי" -> "ישראל ישראלי"
+function bareLawyerName(name) {
+  return String(name || "").replace(/^עו["״]ד\s*/, "").trim();
+}
+function todayDdMmYyyy() {
+  const d = new window.Date();
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
+}
+// Clean rectangular blue stamp: "עו״ד <name> | מ.ר. <license>". Returns a PNG
+// data URL (transparent background), or "" if canvas is unavailable.
+function makeLawyerStampDataUrl(name, license) {
+  try {
+    const W = 520;
+    const H = 170;
+    const c = document.createElement("canvas");
+    c.width = W;
+    c.height = H;
+    const ctx = c.getContext("2d");
+    if (!ctx) return "";
+    const blue = "#1d4ed8";
+    ctx.strokeStyle = blue;
+    ctx.fillStyle = blue;
+    ctx.lineWidth = 6;
+    ctx.strokeRect(6, 6, W - 12, H - 12);
+    ctx.lineWidth = 2;
+    ctx.strokeRect(16, 16, W - 32, H - 32);
+    ctx.direction = "rtl";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "bold 40px Heebo, Arial, sans-serif";
+    ctx.fillText(`עו״ד ${bareLawyerName(name)}`, W / 2, 62, W - 70);
+    ctx.font = "600 30px Heebo, Arial, sans-serif";
+    ctx.fillText(`מ.ר. ${license || "________"}`, W / 2, 114, W - 70);
+    return c.toDataURL("image/png");
+  } catch (e) {
+    return "";
+  }
+}
+
 function buildAffidavitHtml(order, kind) {
   // Standard / municipal tracks get the official delivery certificate instead
   // of the court affidavit. Legal orders continue below, unchanged.
@@ -1575,6 +1715,8 @@ function buildAffidavitHtml(order, kind) {
   const last = attempts[attempts.length - 1];
   const courier = order.courierInfo || lookupCourier(order.assignedCourier);
   const lawyer = order.lawyerInfo || LAWYER_PROFILES[order.submittedBy] || { licenseNo: "________", firm: "", address: "", phone: "" };
+  const lawyerVerified = !!(order.lawyerVerifiedAt || order.lawyerSignature);
+  const lawyerBare = bareLawyerName(order.submittedBy);
   const docLabel = order.docType === "אחר" ? order.customDocType || "אחר" : order.docType;
   const fullAddress = `${order.street} ${order.houseNumber}${order.apartment ? `, דירה ${order.apartment}` : ""}${
     order.floor ? `, קומה ${order.floor}` : ""
@@ -1662,7 +1804,7 @@ function buildAffidavitHtml(order, kind) {
 <head>
 <meta charset="UTF-8" />
 <base target="_blank" />
-<title>תצהיר מוסר — ${escHtml(order.id)}</title>
+<title>תצהיר מוסר — ${escHtml(formatOrderNum(order.id))}</title>
 <style>
   @page { size: A4; margin: 18mm 16mm; }
   * { box-sizing: border-box; }
@@ -1696,7 +1838,7 @@ function buildAffidavitHtml(order, kind) {
   <div class="court">${escHtml(order.court || "בית המשפט")}</div>
   <div class="caption">
     <div>תיק מס': <strong>${escHtml(order.caseNumber || "—")}</strong></div>
-    <div>מס' מסירה: ${escHtml(order.id)}</div>
+    <div>מס' מסירה: ${escHtml(formatOrderNum(order.id))}</div>
   </div>
   <div class="parties">
     <div class="row"><span class="role">התובע / המבקש:</span><span>${escHtml(order.plaintiff || "—")}</span></div>
@@ -1761,17 +1903,21 @@ function buildAffidavitHtml(order, kind) {
     <h2>אימות עורך דין</h2>
     <p>
       אני הח"מ, עו"ד <strong>${escHtml(String(order.submittedBy || "").replace(/^עו"ד\s*/, "") || "________")}</strong>,
-      רישיון מס' <strong>${escHtml(lawyer.licenseNo)}</strong>${lawyer.firm ? `, ${escHtml(lawyer.firm)}` : ""}${
+      רישיון מס' <strong>${escHtml((lawyerVerified && order.lawyerLicenseNumber) || lawyer.licenseNo)}</strong>${lawyer.firm ? `, ${escHtml(lawyer.firm)}` : ""}${
         lawyer.address ? `, ${escHtml(lawyer.address)}` : ""
-      }, מאשר/ת בזאת כי ביום ______________ הופיע/ה בפניי <strong>${escHtml(order.assignedCourier || "________")}</strong>,
+      }, מאשר/ת בזאת כי ביום ${lawyerVerified && order.lawyerVerificationDate ? `<strong>${escHtml(order.lawyerVerificationDate)}</strong>` : "______________"} הופיע/ה בפניי <strong>${escHtml(order.assignedCourier || "________")}</strong>,
       שזיהיתי באמצעות ת.ז. / רישיון שליח מס' ${escHtml(courier ? courier.licenseNumber : "____________")}, ולאחר שהזהרתיו/ה כי עליו/ה
       להצהיר את האמת וכי יהיה/תהיה צפוי/ה לעונשים הקבועים בחוק אם לא יעשה/תעשה כן, אישר/ה את נכונות הצהרתו/ה וחתם/ה עליה בפניי.
     </p>
     <div class="sig-row" style="margin-top:12px">
-      <div><div class="sig-line"></div><div class="meta">חתימת עורך הדין</div></div>
-      <div><div class="sig-line"></div><div class="meta">חותמת</div></div>
+      <div>${lawyerVerified && order.lawyerSignature ? `<img src="${escHtml(order.lawyerSignature)}" alt="חתימת עורך הדין" style="display:block;height:56px;max-width:230px;margin:0 auto -6px" />` : ""}<div class="sig-line"></div><div class="meta">חתימת עורך הדין</div></div>
+      <div>${lawyerVerified && order.lawyerStamp ? `<img src="${escHtml(order.lawyerStamp)}" alt="חותמת עורך הדין" style="display:block;height:64px;max-width:230px;margin:0 auto -6px" />` : ""}<div class="sig-line"></div><div class="meta">חותמת</div></div>
     </div>
-    <p class="meta" style="margin:8px 0 0">האימות ייחתם בידי עורך הדין בלבד — המערכת ממלאת את פרטיו מראש אך אינה חותמת במקומו.</p>
+    <p class="meta" style="margin:8px 0 0">${
+      lawyerVerified
+        ? `נחתם ואומת דיגיטלית בידי עו״ד ${escHtml(lawyerBare || "________")} בתאריך ${escHtml(order.lawyerVerificationDate || "________")}`
+        : "האימות ייחתם בידי עורך הדין בלבד — המערכת ממלאת את פרטיו מראש אך אינה חותמת במקומו."
+    }</p>
   </div>
 
   <p class="foot">הופק אוטומטית ממערכת מסירות משפטיות · ${escHtml(reportDate)} · כולל תיעוד GPS, מדיה ושמע לכל ביקור</p>
@@ -1799,7 +1945,7 @@ function buildDeliveryCertificateHtml(order) {
     .join("");
   const row = (k, v) => `<tr><th>${k}</th><td>${v}</td></tr>`;
   return `<!DOCTYPE html>
-<html lang="he" dir="rtl"><head><meta charset="utf-8" /><title>אישור מסירה ${escHtml(order.id)}</title>
+<html lang="he" dir="rtl"><head><meta charset="utf-8" /><title>אישור מסירה ${escHtml(formatOrderNum(order.id))}</title>
 <style>
   body { font-family: Heebo, Arial, sans-serif; color:#111827; padding: 28px; max-width: 760px; margin: 0 auto; }
   h1 { text-align:center; font-size: 22px; margin: 0 0 4px; }
@@ -1816,9 +1962,9 @@ function buildDeliveryCertificateHtml(order) {
 </style></head>
 <body>
   <h1>אישור מסירה רשמי — מסירות אקספרס</h1>
-  <p class="sub">${escHtml(t.badge)} · מס' מסירה ${escHtml(order.id)}</p>
+  <p class="sub">${escHtml(t.badge)} · מס' מסירה ${escHtml(formatOrderNum(order.id))}</p>
   <table>
-    ${row("מס' הזמנה", escHtml(order.id))}
+    ${row("מס' הזמנה", escHtml(formatOrderNum(order.id)))}
     ${row("סוג מסירה", escHtml(t.badge))}
     ${row(isAuthority ? "הרשות / הלקוח" : "לקוח", escHtml(isAuthority && order.court ? `${order.court} (${clientName})` : clientName))}
     ${row("מספר אסמכתא", escHtml(order.caseNumber || "—"))}
@@ -1853,7 +1999,7 @@ function downloadAffidavit(order, kind) {
   const url = window.URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `${usesAffidavit(order) && kind !== "certificate" ? "תצהיר-מסירה" : "אישור-מסירה"}-${order.id}.html`;
+  a.download = `${usesAffidavit(order) && kind !== "certificate" ? "תצהיר-מסירה" : "אישור-מסירה"}-${formatOrderNum(order.id, true)}.html`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -1865,7 +2011,7 @@ function exportOrdersCsv(orders, filename = "דוח-מסירות.csv") {
   const head = ["מס' הזמנה", "תאריך", "מסלול", "לקוח / רשות", "אסמכתא / מס' תיק", "נמען", "כתובת", "עיר", "סטטוס", "מספר ביקורים", "שליח", "מחיר"];
   const cell = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
   const rows = orders.map((o) => [
-    o.id,
+    formatOrderNum(o.id),
     o.createdDate || "",
     DELIVERY_TRACKS[trackOf(o)].badge.replace(/^\S+\s/, ""),
     trackOf(o) === "municipal" && o.court ? `${o.court} (${o.submittedBy || ""})` : o.submittedBy || "",
@@ -2607,12 +2753,12 @@ function NewOrderForm({ onCreate }) {
             />
             <datalist id="cities-list">
               {PRICING_ZONES.flatMap((z) => z.cities.map((c) => (
-                <option key={c} value={c} label={`${z.short} — ${formatILS(z.price)}`} />
+                <option key={c} value={c} label={`${zoneLabelFor(c)} — ${formatILS(z.price)}`} />
               )))}
             </datalist>
             {cityError && <p className="mt-1 text-xs text-rose-600">יש לבחור יישוב מהרשימה</p>}
             {!cityError && normalizeCity(form.city) && (
-              <p className="mt-1 text-xs text-slate-500">{zoneForCity(normalizeCity(form.city)).short} — {formatILS(zoneForCity(normalizeCity(form.city)).price)}</p>
+              <p className="mt-1 text-xs text-slate-500">{zoneLabelFor(normalizeCity(form.city))} — {formatILS(zoneForCity(normalizeCity(form.city)).price)}</p>
             )}
           </div>
         </Field>
@@ -2934,7 +3080,7 @@ function ServiceChips({ order }) {
 function OrderDetailsModal({ order, onClose, onOpenAffidavit, onCancel, showPrice = true }) {
   if (!order) return null;
   return (
-    <Modal open={!!order} onClose={onClose} title={`תיק ביקורת מסירה — ${order.id}`} wide>
+    <Modal open={!!order} onClose={onClose} title={`תיק ביקורת מסירה — ${formatOrderNum(order.id)}`} wide>
       <div className="space-y-4">
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={order.status} />
@@ -3073,75 +3219,140 @@ function EvidenceThumb({ src, label, name }) {
   );
 }
 
-// "היסטוריה": one card PER delivery with every saved photo, the recipient's
-// signature and the courier's signed affidavit.
-function OrderHistoryList({ orders, onOpenAffidavit }) {
-  const rows = orders
-    .filter((o) => isOrderCompleted(o))
-    .slice()
-    .sort((a, b) => String(b.id).localeCompare(String(a.id), "he", { numeric: true }));
-  if (!rows.length) {
+// One finished delivery: every saved photo, the recipient's signature, the
+// courier's signed affidavit and the affidavit / certificate button.
+function HistoryOrderCard({ o, onOpenAffidavit }) {
+  const visits = o.attempts || [];
+    const sig = visits.map((a) => a.signatureDataUrl).filter(Boolean).pop() || (typeof o.signature === "string" && o.signature !== "SIGNED" ? o.signature : null);
     return (
-      <div className="rounded-2xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400">
-        עדיין אין מסירות בהיסטוריה
-      </div>
+      <section key={o.id} className="rounded-2xl border border-slate-200/60 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <p className="font-semibold text-slate-800">{o.recipientName}</p>
+            <p className="text-xs text-slate-400">
+              {formatOrderNum(o.id)} · {o.docType} · {o.street} {o.houseNumber}, {o.city}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <TrackBadge order={o} />
+            <StatusBadge status={o.status} />
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-3">
+          {visits.map((a, i) => (
+            <EvidenceThumb
+              key={`p${i}`}
+              src={a.photo && a.photo.dataUrl && a.photo.kind !== "video" ? a.photo.dataUrl : null}
+              label={`ביקור ${i + 1}: ${a.type}`}
+              name={`${o.id}-visit-${i + 1}.jpg`}
+            />
+          ))}
+          <EvidenceThumb src={sig} label="חתימת הנמען" name={`${o.id}-recipient-signature.jpg`} />
+          <EvidenceThumb
+            src={o.affidavit && o.affidavit.signature}
+            label="חתימת תצהיר (שליח)"
+            name={`${o.id}-affidavit-signature.jpg`}
+          />
+        </div>
+        {visits.length > 0 && (
+          <ul className="mt-3 space-y-0.5 text-xs text-slate-500">
+            {visits.map((a, i) => (
+              <li key={`t${i}`}>
+                ביקור {i + 1} · {a.type} · {a.timestamp}
+                {a.location ? ` · ${a.location}` : ""}
+              </li>
+            ))}
+          </ul>
+        )}
+        {isAffidavitSigned(o) && onOpenAffidavit && (
+          <button
+            type="button"
+            onClick={() => onOpenAffidavit(o.id)}
+            className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200 hover:bg-indigo-100"
+          >
+            <FileText className="h-3.5 w-3.5" /> {usesAffidavit(o) ? "צפייה בתצהיר החתום" : "צפייה באישור המסירה"}
+          </button>
+        )}
+      </section>
     );
-  }
+}
+
+// Upgrade 5 — the month a finished delivery belongs to: the month it was
+// completed (last visit / signature), falling back to the month it was created.
+function orderMonthKey(o) {
+  const att = effectiveAttempts(o);
+  const last = att[att.length - 1];
+  const ts = (last && last.timestamp) || o.completedAt || (o.affidavit && o.affidavit.signedAt) || o.createdAt || o.createdDate || "";
+  const k = monthKeyOf(ts);
+  return /^\d{4}-\d{2}$/.test(k) ? k : "";
+}
+
+// "היסטוריה": "ריכוז חודשים — כל חודש בנפרד". One card per calendar month
+// (always including the current one) with its delivery count, total cost and
+// its own CSV export; opening a month shows that month's delivery cards.
+function OrderHistoryList({ orders, onOpenAffidavit }) {
+  const currentMonthKey = nowStamp(0).slice(0, 7);
+  const [selected, setSelected] = useState(currentMonthKey);
+  const finished = useMemo(() => orders.filter((o) => isOrderCompleted(o)), [orders]);
+  const byMonth = useMemo(() => {
+    const m = {};
+    finished.forEach((o) => {
+      const k = orderMonthKey(o) || currentMonthKey;
+      (m[k] = m[k] || []).push(o);
+    });
+    Object.values(m).forEach((list) =>
+      list.sort((a, b) => String(b.id).localeCompare(String(a.id), "he", { numeric: true }))
+    );
+    return m;
+  }, [finished, currentMonthKey]);
+  const monthKeys = useMemo(() => {
+    const keys = new window.Set([currentMonthKey, ...Object.keys(byMonth)]);
+    return Array.from(keys).sort().reverse();
+  }, [byMonth, currentMonthKey]);
+
   return (
-    <div className="space-y-4">
-      {rows.map((o) => {
-        const visits = o.attempts || [];
-        const sig = visits.map((a) => a.signatureDataUrl).filter(Boolean).pop() || (typeof o.signature === "string" && o.signature !== "SIGNED" ? o.signature : null);
+    <div className="space-y-3">
+      <p className="text-sm font-bold text-slate-700">ריכוז חודשים — כל חודש בנפרד</p>
+      {monthKeys.map((key) => {
+        const list = byMonth[key] || [];
+        const total = list.reduce((sum, o) => sum + calcClientPrice(o).total, 0);
+        const open = selected === key;
         return (
-          <section key={o.id} className="rounded-2xl border border-slate-200/60 bg-white p-4 shadow-sm">
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div>
-                <p className="font-semibold text-slate-800">{o.recipientName}</p>
-                <p className="text-xs text-slate-400">
-                  {o.id} · {o.docType} · {o.street} {o.houseNumber}, {o.city}
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-1.5">
-                <TrackBadge order={o} />
-                <StatusBadge status={o.status} />
-              </div>
-            </div>
-            <div className="mt-3 flex flex-wrap gap-3">
-              {visits.map((a, i) => (
-                <EvidenceThumb
-                  key={`p${i}`}
-                  src={a.photo && a.photo.dataUrl && a.photo.kind !== "video" ? a.photo.dataUrl : null}
-                  label={`ביקור ${i + 1}: ${a.type}`}
-                  name={`${o.id}-visit-${i + 1}.jpg`}
-                />
-              ))}
-              <EvidenceThumb src={sig} label="חתימת הנמען" name={`${o.id}-recipient-signature.jpg`} />
-              <EvidenceThumb
-                src={o.affidavit && o.affidavit.signature}
-                label="חתימת תצהיר (שליח)"
-                name={`${o.id}-affidavit-signature.jpg`}
-              />
-            </div>
-            {visits.length > 0 && (
-              <ul className="mt-3 space-y-0.5 text-xs text-slate-500">
-                {visits.map((a, i) => (
-                  <li key={`t${i}`}>
-                    ביקור {i + 1} · {a.type} · {a.timestamp}
-                    {a.location ? ` · ${a.location}` : ""}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {isAffidavitSigned(o) && onOpenAffidavit && (
+          <div key={key} className={`rounded-2xl border bg-white shadow-sm ${open ? "border-indigo-300" : "border-slate-200/60"}`}>
+            <div className="flex flex-wrap items-center justify-between gap-2 p-4">
               <button
                 type="button"
-                onClick={() => onOpenAffidavit(o.id)}
-                className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200 hover:bg-indigo-100"
+                onClick={() => setSelected(open ? null : key)}
+                aria-expanded={open}
+                className="flex flex-1 items-center gap-3 text-right"
               >
-                <FileText className="h-3.5 w-3.5" /> {usesAffidavit(o) ? "צפייה בתצהיר החתום" : "צפייה באישור המסירה"}
+                <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition ${open ? "rotate-180" : ""}`} />
+                <span>
+                  <span className="block font-semibold text-slate-800">{monthLabel(key)}</span>
+                  <span className="block text-xs text-slate-500">
+                    {list.length} מסירות · סה"כ עלות {formatILS(total)}
+                  </span>
+                </span>
               </button>
+              <button
+                type="button"
+                disabled={!list.length}
+                onClick={() => exportOrdersCsv(list, `מסירות-${key}.csv`)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                📥 ייצוא חודש לאקסל (CSV)
+              </button>
+            </div>
+            {open && (
+              <div className="space-y-4 border-t border-slate-100 p-4">
+                {list.length ? (
+                  list.map((o) => <HistoryOrderCard key={o.id} o={o} onOpenAffidavit={onOpenAffidavit} />)
+                ) : (
+                  <p className="py-6 text-center text-sm text-slate-400">אין מסירות שהושלמו בחודש זה</p>
+                )}
+              </div>
             )}
-          </section>
+          </div>
         );
       })}
     </div>
@@ -3220,7 +3431,7 @@ function CourierMonthlyEarnings({ orders, pricing, currentMonthKey }) {
                     return (
                       <div key={o.id} className="flex items-start justify-between gap-2 rounded-lg bg-white p-2.5 text-sm ring-1 ring-inset ring-slate-100">
                         <div className="min-w-0">
-                          <p className="font-semibold text-slate-700">{o.id}</p>
+                          <p className="font-semibold text-slate-700">{formatOrderNum(o.id)}</p>
                           <p className="truncate text-xs text-slate-500">
                             {o.recipientName} · {o.street} {o.houseNumber}, {o.city}
                           </p>
@@ -3243,12 +3454,14 @@ function CourierMonthlyEarnings({ orders, pricing, currentMonthKey }) {
   );
 }
 
-function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notifications = [], onReadNotification, lockedLawyer = null }) {
+function LawyerPortal({ orders, onCreate, onCancelOrder, onDeleteOrder, onLawyerVerify, onSwitchRole, notifications = [], onReadNotification, lockedLawyer = null }) {
   const [tab, setTab] = useState("status");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState(null);
   const [affidavitId, setAffidavitId] = useState(null);
   const [cancelId, setCancelId] = useState(null);
+  const [deleteId, setDeleteId] = useState(null);
+  const [showCancelled, setShowCancelled] = useState(false);
   const [currentLawyer, setCurrentLawyer] = useState(lockedLawyer || LAWYERS[0]);
   const [bellOpen, setBellOpen] = useState(false);
 
@@ -3266,12 +3479,17 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notificat
   );
 
   // "סטטוס" shows only active orders; finished ones move to "היסטוריה".
-  const activeMyOrders = useMemo(() => myOrders.filter((o) => !isOrderCompleted(o)), [myOrders]);
+  // Cancelled orders leave this list the instant they are cancelled.
+  const activeMyOrders = useMemo(() => myOrders.filter((o) => !isOrderCompleted(o) && !isOrderCancelled(o)), [myOrders]);
+  const cancelledMyOrders = useMemo(() => myOrders.filter(isOrderCancelled), [myOrders]);
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return activeMyOrders;
     return activeMyOrders.filter(
-      (o) => o.recipientName.toLowerCase().includes(q) || o.id.toLowerCase().includes(q)
+      (o) =>
+        o.recipientName.toLowerCase().includes(q) ||
+        o.id.toLowerCase().includes(q) ||
+        orderNumberOf(o.id).includes(q.replace(/^#/, "").replace(/^ord-?/, ""))
     );
   }, [activeMyOrders, query]);
 
@@ -3281,6 +3499,7 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notificat
   const selected = myOrders.find((o) => o.id === selectedId) || null;
   const affidavitOrder = myOrders.find((o) => o.id === affidavitId) || null;
   const cancelTarget = myOrders.find((o) => o.id === cancelId) || null;
+  const deleteTarget = myOrders.find((o) => o.id === deleteId && isOrderCancelled(o)) || null;
 
   // Clicking a notification opens the full audit file of that order (only if
   // it really is one of this lawyer's own) and marks the notification read.
@@ -3380,7 +3599,7 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notificat
                         n.read ? "text-slate-500" : "bg-emerald-50/60 font-semibold text-slate-700"
                       }`}
                     >
-                      {n.message}
+                      {cleanOrderText(n.message)}
                       <span className="mt-0.5 block text-[10px] font-normal text-slate-400">{n.createdAt}</span>
                     </button>
                   ))}
@@ -3398,7 +3617,7 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notificat
             className="flex items-center gap-2 rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800 ring-1 ring-inset ring-emerald-200"
           >
             <button type="button" onClick={() => openNotification(n)} className="flex-1 text-right">
-              <span className="font-bold">🔔 {n.message}</span>
+              <span className="font-bold">🔔 {cleanOrderText(n.message)}</span>
               <span className="mt-0.5 block text-xs font-normal text-emerald-600">לחצו לפתיחת תיק הביקורת המלא</span>
             </button>
             <button
@@ -3517,6 +3736,37 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notificat
           </div>
         )}
 
+        {tab === "status" && cancelledMyOrders.length > 0 && onDeleteOrder && (
+          <div className="rounded-2xl border border-slate-200/60 bg-white p-4">
+            <button
+              type="button"
+              onClick={() => setShowCancelled((v) => !v)}
+              className="flex w-full items-center justify-between text-sm font-semibold text-slate-600"
+            >
+              <span>🚫 מסירות שבוטלו ({cancelledMyOrders.length})</span>
+              <ChevronDown className={`h-4 w-4 transition ${showCancelled ? "rotate-180" : ""}`} />
+            </button>
+            {showCancelled && (
+              <ul className="mt-3 space-y-2">
+                {cancelledMyOrders.map((o) => (
+                  <li key={o.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-sm">
+                    <span className="text-slate-600">
+                      <strong>{formatOrderNum(o.id)}</strong> · {o.recipientName} · {o.city}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setDeleteId(o.id)}
+                      className="rounded-md border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100"
+                    >
+                      🗑️ מחק לצמיתות
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
         {tab === "history" && (
           <div className="space-y-3">
             <CsvExportButton orders={myOrders.filter(isOrderCompleted)} filename="היסטוריית-מסירות.csv" />
@@ -3538,7 +3788,7 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notificat
           {cancelTarget && (
             <div className="space-y-4">
               <p className="text-sm text-slate-600">
-                לבטל את ההזמנה <strong>{cancelTarget.id}</strong> עבור <strong>{cancelTarget.recipientName}</strong>? ניתן לבטל רק לפני ששליח שובץ למסירה. הפעולה אינה הפיכה.
+                לבטל את ההזמנה <strong>{formatOrderNum(cancelTarget.id)}</strong> עבור <strong>{cancelTarget.recipientName}</strong>? ניתן לבטל רק לפני ששליח שובץ למסירה. הפעולה אינה הפיכה.
               </p>
               <div className="flex gap-2">
                 <button
@@ -3563,8 +3813,37 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onSwitchRole, notificat
             </div>
           )}
         </Modal>
+        <Modal open={!!deleteTarget} onClose={() => setDeleteId(null)} title="מחיקה לצמיתות">
+          {deleteTarget && (
+            <div className="space-y-4">
+              <p className="text-sm text-slate-600">
+                למחוק לצמיתות את ההזמנה המבוטלת <strong>{formatOrderNum(deleteTarget.id)}</strong> עבור <strong>{deleteTarget.recipientName}</strong>? ההזמנה תימחק מהמערכת ולא ניתן לשחזר אותה.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onDeleteOrder(deleteTarget.id);
+                    setDeleteId(null);
+                    setSelectedId(null);
+                  }}
+                  className="flex-1 rounded-lg bg-rose-600 px-3 py-2 text-sm font-semibold text-white hover:bg-rose-700"
+                >
+                  🗑️ מחק לצמיתות
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDeleteId(null)}
+                  className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                >
+                  חזרה
+                </button>
+              </div>
+            </div>
+          )}
+        </Modal>
         {/* Read-only for the lawyer: shows the courier's signature, with print / download. */}
-        <AffidavitModal order={affidavitOrder} onClose={() => setAffidavitId(null)} />
+        <AffidavitModal order={affidavitOrder} onClose={() => setAffidavitId(null)} onLawyerVerify={onLawyerVerify} />
       </div>
 
       <BottomNav items={navItems} active={tab} onChange={setTab} />
@@ -4498,7 +4777,7 @@ function PriceRequestModal({ order, courier, onClose, onSubmit }) {
         <div className="rounded-lg bg-slate-50 p-3 text-sm">
           <p className="font-medium text-slate-700">{order.recipientName}</p>
           <p className="text-xs text-slate-400">
-            {order.street} {order.houseNumber}, {order.city} · {order.id}
+            {order.street} {order.houseNumber}, {order.city} · {formatOrderNum(order.id)}
           </p>
         </div>
         <p className="text-xs text-slate-400">
@@ -4718,7 +4997,7 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
             {order.recipientName}
             {speedOf(order) !== "standard" && <Zap className="h-4 w-4 text-amber-500" />}
           </p>
-          <p className="text-xs text-slate-400">{order.id} · {order.docType}</p>
+          <p className="text-xs text-slate-400">{formatOrderNum(order.id)} · {order.docType}</p>
         </div>
         <StatusBadge status={order.status} />
       </div>
@@ -5008,7 +5287,7 @@ function OpenOrdersTab({ openOrders, takenMessages, myResponses, courierId, onRe
                 <p className="text-xs text-slate-500">{o.docType === "אחר" && o.customDocType ? o.customDocType : o.docType}</p>
               </div>
               <div className="flex flex-col items-end gap-1">
-                <span className="text-[11px] font-medium text-slate-400">{o.id}</span>
+                <span className="text-[11px] font-medium text-slate-400">{formatOrderNum(o.id)}</span>
                 {speedOf(o) !== "standard" && (
                   <span className="flex items-center gap-0.5 rounded-md bg-amber-50 px-1.5 py-px text-[10px] font-medium text-amber-700 ring-1 ring-inset ring-amber-200">
                     <Zap className="h-2.5 w-2.5" /> {speed.label}
@@ -5395,7 +5674,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
                       <div>
                         <p className="font-semibold text-slate-800">{o.recipientName}</p>
                         <p className="text-xs text-slate-400">
-                          {o.id} · {o.docType}
+                          {formatOrderNum(o.id)} · {o.docType}
                         </p>
                       </div>
                       <div className="flex flex-col items-end gap-1">
@@ -5554,7 +5833,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <p className="font-medium text-slate-700">
-                          {o.id} - {o.recipientName}
+                          {formatOrderNum(o.id)} - {o.recipientName}
                         </p>
                         <p className={`mt-0.5 text-xs font-semibold ${done ? "text-emerald-600" : "text-amber-600"}`}>
                           {done ? `הושלם - ${o.status}` : `ביקור ${o.attempts.length} מתוך 3`}
@@ -5736,8 +6015,18 @@ function AffidavitBadge({ order }) {
 //    "חתימה מחדש" option.
 //  - Lawyer (no onSign): read-only — the courier's signature once it exists,
 //    with print + download.
-function AffidavitModal({ order, onClose, onSign }) {
+function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
   const [signing, setSigning] = useState(false);
+  // Upgrade 3 — lawyer verification panel state (only ever used when the
+  // portal that opened the modal passed onLawyerVerify, i.e. the OWNING lawyer).
+  const [vOpen, setVOpen] = useState(false);
+  const [vLicense, setVLicense] = useState("");
+  const [vDate, setVDate] = useState("");
+  const [vSig, setVSig] = useState("");
+  const [vStamp, setVStamp] = useState("");
+  const [vStampMode, setVStampMode] = useState("auto");
+  const [vSigning, setVSigning] = useState(false);
+  const [vSaving, setVSaving] = useState(false);
   // Municipal 3-visit orders get BOTH documents: the legal affidavit (default) and the certificate.
   const [docKind, setDocKind] = useState("affidavit");
   const frameRef = useRef(null);
@@ -5746,7 +6035,25 @@ function AffidavitModal({ order, onClose, onSign }) {
   useEffect(() => {
     setSigning(false);
     setDocKind("affidavit");
+    setVOpen(false);
+    setVSigning(false);
+    setVSaving(false);
+    if (order) {
+      const prof = order.lawyerInfo || LAWYER_PROFILES[order.submittedBy] || {};
+      setVLicense(order.lawyerLicenseNumber || prof.licenseNo || "");
+      setVDate(order.lawyerVerificationDate || todayDdMmYyyy());
+      setVSig(order.lawyerSignature || "");
+      setVStamp(order.lawyerStamp || "");
+      setVStampMode(order.lawyerStamp ? "upload" : "auto");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [order?.id]);
+
+  // The automatic stamp follows the license number / name as they are edited.
+  const autoStamp = useMemo(
+    () => (order && vStampMode === "auto" ? makeLawyerStampDataUrl(order.submittedBy, vLicense) : ""),
+    [order, vStampMode, vLicense]
+  );
 
   if (!order) return null;
   const signed = isAffidavitSigned(order);
@@ -5754,6 +6061,40 @@ function AffidavitModal({ order, onClose, onSign }) {
   const asAffidavit = usesAffidavit(order) && docKind === "affidavit";
   const canToggle = trackOf(order) === "municipal" && usesAffidavit(order);
   const docWord = asAffidavit ? "תצהיר" : "אישור מסירה";
+  // Only the owning lawyer's portal passes onLawyerVerify; the courier and the
+  // admin screens never do, so they can neither see nor use the panel.
+  const canVerify = !!onLawyerVerify && asAffidavit && signed;
+  const lawyerVerified = !!(order.lawyerVerifiedAt || order.lawyerSignature);
+  const finalStamp = vStampMode === "auto" ? autoStamp : vStamp;
+  const canSaveVerify = !!(vLicense.trim() && vDate.trim() && vSig && finalStamp) && !vSaving;
+  const handleStampUpload = async (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    try {
+      const raw = await fileToDataUrl(f);
+      setVStamp((await compressDataUrl(raw, 600, 0.85).catch(() => raw)) || raw);
+      setVStampMode("upload");
+    } catch (err) {
+      /* unreadable file — keep the previous stamp */
+    }
+  };
+  const handleSaveVerify = async () => {
+    if (!canSaveVerify) return;
+    setVSaving(true);
+    try {
+      await onLawyerVerify(order.id, {
+        lawyerLicenseNumber: vLicense.trim(),
+        lawyerVerificationDate: vDate.trim(),
+        lawyerSignature: vSig,
+        lawyerStamp: finalStamp,
+        lawyerVerifiedAt: nowStamp(0),
+      });
+      setVOpen(false);
+    } finally {
+      setVSaving(false);
+    }
+  };
 
   // Approving in the full-screen signing overlay saves the signature onto the
   // order (the parent updates the shared orders list, so every list, badge and
@@ -5806,10 +6147,92 @@ function AffidavitModal({ order, onClose, onSign }) {
       {/* The exact same HTML that is printed / downloaded. */}
       <iframe
         ref={frameRef}
-        title={`תצהיר מוסר ${order.id}`}
+        title={`תצהיר מוסר ${formatOrderNum(order.id)}`}
         srcDoc={buildAffidavitHtml(order, docKind)}
         className="h-[60vh] w-full rounded-lg border border-slate-200/60 bg-white"
       />
+
+      {canVerify && (
+        <div className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/40 p-3">
+          <button
+            type="button"
+            onClick={() => setVOpen((v) => !v)}
+            className="flex w-full items-center justify-between text-sm font-bold text-indigo-700"
+          >
+            <span>
+              ✍️ מילוי וחתימת אימות עורך דין
+              {lawyerVerified && <span className="mr-2 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">נחתם {order.lawyerVerifiedAt || ""}</span>}
+            </span>
+            <ChevronDown className={`h-4 w-4 transition ${vOpen ? "rotate-180" : ""}`} />
+          </button>
+          {vOpen && (
+            <div className="mt-3 space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block text-xs font-semibold text-slate-600">
+                  מספר רישיון עורך דין
+                  <input
+                    value={vLicense}
+                    onChange={(e) => setVLicense(e.target.value)}
+                    inputMode="numeric"
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                  />
+                </label>
+                <label className="block text-xs font-semibold text-slate-600">
+                  תאריך האימות (DD/MM/YYYY)
+                  <input
+                    value={vDate}
+                    onChange={(e) => setVDate(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                  />
+                </label>
+              </div>
+              <div>
+                <p className="mb-1 text-xs font-semibold text-slate-600">חתימת עורך הדין</p>
+                <button
+                  type="button"
+                  onClick={() => setVSigning(true)}
+                  className="flex h-20 w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-indigo-300 bg-white text-indigo-600 hover:bg-indigo-50"
+                >
+                  {vSig ? <img src={vSig} alt="חתימת עורך הדין" className="h-16 object-contain" /> : (<><PenTool className="h-5 w-5" /> חתמו כאן</>)}
+                </button>
+              </div>
+              <div>
+                <p className="mb-1 text-xs font-semibold text-slate-600">חותמת עורך הדין</p>
+                <div className="mb-2 flex gap-2">
+                  {[["auto", "חותמת אוטומטית"], ["upload", "העלאת תמונת חותמת"]].map(([k, l]) => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => setVStampMode(k)}
+                      className={`flex-1 rounded-lg border-2 px-3 py-1.5 text-xs font-semibold ${
+                        vStampMode === k ? "border-indigo-600 bg-white text-indigo-700" : "border-slate-200 text-slate-600"
+                      }`}
+                    >
+                      {l}
+                    </button>
+                  ))}
+                </div>
+                {vStampMode === "upload" && (
+                  <input type="file" accept="image/*" onChange={handleStampUpload} className="mb-2 block w-full text-xs text-slate-600" />
+                )}
+                {finalStamp ? (
+                  <img src={finalStamp} alt="חותמת" className="h-16 rounded border border-slate-200 bg-white object-contain p-1" />
+                ) : (
+                  <p className="text-[11px] text-slate-400">{vStampMode === "upload" ? "בחרו תמונת חותמת" : "החותמת תיווצר לאחר הזנת מספר רישיון"}</p>
+                )}
+              </div>
+              <button
+                type="button"
+                disabled={!canSaveVerify}
+                onClick={handleSaveVerify}
+                className="w-full rounded-lg bg-gradient-to-r from-indigo-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                אשר וחתום אימות עורך דין
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {canEdit && (
         <div className="mt-4">
@@ -5859,9 +6282,19 @@ function AffidavitModal({ order, onClose, onSign }) {
       )}
 
       <FullScreenSignatureModal
+        open={vSigning}
+        title="חתימת עורך הדין — אימות"
+        subtitle={`${formatOrderNum(order.id)} · ${order.recipientName}`}
+        onCancel={() => setVSigning(false)}
+        onConfirm={(dataUrl) => {
+          setVSig(dataUrl);
+          setVSigning(false);
+        }}
+      />
+      <FullScreenSignatureModal
         open={signing}
         title={`חתימת השליח על ה${docWord}`}
-        subtitle={`${order.id} · ${order.recipientName}`}
+        subtitle={`${formatOrderNum(order.id)} · ${order.recipientName}`}
         onCancel={() => setSigning(false)}
         onConfirm={handleConfirmSignature}
       />
@@ -5920,7 +6353,7 @@ function PricingModal({ order, pricing, onClose, onSave }) {
   };
 
   return (
-    <Modal open={!!order} onClose={onClose} title={`תמחור מותאם אישית — ${order.id}`}>
+    <Modal open={!!order} onClose={onClose} title={`תמחור מותאם אישית — ${formatOrderNum(order.id)}`}>
       <div className="space-y-4">
         <div className="rounded-lg bg-slate-50 p-3 text-sm">
           <p className="font-medium text-slate-700">{order.recipientName}</p>
@@ -6501,7 +6934,7 @@ function PriceRequestsPanel({ orders, onApprove, onReject }) {
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div>
                     <p className="font-semibold text-slate-800">
-                      {order.recipientName} · {order.id}
+                      {order.recipientName} · {formatOrderNum(order.id)}
                     </p>
                     <p className="text-xs text-slate-500">
                       {order.street} {order.houseNumber}, {order.city} · שליח: {request.courier}
@@ -6573,7 +7006,7 @@ function PriceRequestsPanel({ orders, onApprove, onReject }) {
                 {resolved.map(({ order, request }) => (
                   <tr key={request.id} className="border-t border-slate-100">
                     <td className="px-3 py-2.5 text-slate-700">
-                      {order.id} · {order.recipientName}
+                      {formatOrderNum(order.id)} · {order.recipientName}
                     </td>
                     <td className="px-3 py-2.5 text-slate-600">{request.courier}</td>
                     <td className="px-3 py-2.5 text-slate-600">
@@ -6978,11 +7411,11 @@ function MarginModal({ order, pricing, onClose }) {
   if (!order) return null;
   const m = calcOrderMargin(order, pricing);
   return (
-    <Modal open={!!order} onClose={onClose} title={`תמחור ורווחיות — ${order.id}`}>
+    <Modal open={!!order} onClose={onClose} title={`תמחור ורווחיות — ${formatOrderNum(order.id)}`}>
       <div className="space-y-4 text-sm">
         <div className="flex flex-wrap gap-1.5">
           <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
-            <MapPin className="h-3 w-3" /> {order.city} · {m.price.zone.short}
+            <MapPin className="h-3 w-3" /> {order.city} · {zoneLabelFor(order.city)}
           </span>
           <ServiceChips order={order} />
         </div>
@@ -7054,6 +7487,7 @@ function AdminDashboard({
   onEnableNotify,
   onTestNotify,
   onSignAffidavit,
+  onDeleteOrder,
 }) {
   const [dashTab, setDashTab] = useState(() => (window.location.hash === "#couriers" ? "couriers" : "overview"));
   const [activeFilter, setActiveFilter] = useState(null);
@@ -7270,7 +7704,20 @@ function AdminDashboard({
         ))}
       </div>
 
-      <div className="flex justify-end">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {activeFilter === "canceled" && onDeleteOrder && filteredOrders.length > 0 && (
+          <button
+            type="button"
+            onClick={() => {
+              if (window.confirm(`למחוק לצמיתות את כל ${filteredOrders.length} ההזמנות המבוטלות? לא ניתן לשחזר.`)) {
+                filteredOrders.filter(isOrderCancelled).forEach((o) => onDeleteOrder(o.id));
+              }
+            }}
+            className="rounded-lg bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-700"
+          >
+            🗑️ מחק את כל המבוטלות לצמיתות
+          </button>
+        )}
         <CsvExportButton orders={filteredOrders} filename="דוח-מסירות-מנהל.csv" />
       </div>
       {activeFilter === "completed" && <MarginSummary orders={filteredOrders} pricing={pricing} />}
@@ -7326,7 +7773,7 @@ function AdminDashboard({
                         id={`order-row-${o.id}`}
                         className={`border-t border-slate-100 ${assignOrderId === o.id ? "bg-orange-50 ring-2 ring-inset ring-orange-300" : ""}`}
                       >
-                        <td className="px-3 py-2.5 font-medium text-slate-700">{o.id}</td>
+                        <td className="px-3 py-2.5 font-medium text-slate-700">{formatOrderNum(o.id)}</td>
                         <td className="px-3 py-2.5 text-slate-600">{o.recipientName}</td>
                         <td className="px-3 py-2.5 text-slate-500">
                           {o.street} {o.houseNumber}
@@ -7449,6 +7896,16 @@ function AdminDashboard({
                               <ScrollText className="h-3.5 w-3.5" /> {usesAffidavit(o) ? "הפקת תצהיר וחתימה" : "אישור מסירה רשמי"}
                             </button>
                           ) : null}
+                          {isOrderCancelled(o) && onDeleteOrder && (
+                            <button
+                              onClick={() => {
+                                if (window.confirm(`למחוק לצמיתות את ההזמנה ${formatOrderNum(o.id)}? לא ניתן לשחזר.`)) onDeleteOrder(o.id);
+                              }}
+                              className="rounded-md border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100"
+                            >
+                              🗑️ מחק לצמיתות
+                            </button>
+                          )}
                           </div>
                         </td>
                       </tr>
@@ -7688,7 +8145,7 @@ async function showNewOrderNotification(order) {
   if (!reg) return;
   const address = [`${order.street || ""} ${order.houseNumber || ""}`.trim(), order.city].filter(Boolean).join(", ");
   reg.showNotification("מסירות משפטיות — מסירה חדשה ממתינה לשיבוץ", {
-    body: `מסירה חדשה (#${order.id}) מאת ${order.submittedBy || "—"} לכתובת ${address || "—"} ממתינה לשיבוץ שליח`,
+    body: `מסירה חדשה (${formatOrderNum(order.id)}) מאת ${order.submittedBy || "—"} לכתובת ${address || "—"} ממתינה לשיבוץ שליח`,
     tag: `new-order-${order.id}`,
     dir: "rtl",
     lang: "he",
@@ -7928,6 +8385,9 @@ async function orderToRow(o) {
   }
   if (typeof data.signature === "string" && data.signature.startsWith("data:")) {
     data.signature = await uploadEvidence(`${o.id}/recipient-signature`, data.signature);
+  }
+  for (const k of ["lawyerSignature", "lawyerStamp"]) {
+    if (typeof data[k] === "string" && data[k].startsWith("data:")) data[k] = await uploadEvidence(`${o.id}/${k}`, data[k]);
   }
   return {
     id: o.id,
@@ -8187,7 +8647,7 @@ async function notifyNewOrder(o) {
     const speedLabel = (SPEED_OPTIONS.find((x) => x.key === (o.speed || "standard")) || SPEED_OPTIONS[0]).label;
     const message = [
       "הזמנת מסירה חדשה",
-      `מספר הזמנה: ${o.id}`,
+      `מספר הזמנה: ${formatOrderNum(o.id)}`,
       `לקוח: ${o.submittedBy || ""}${info.firm ? " (" + info.firm + ")" : ""}`,
       `נמען: ${o.recipientName}`,
       `כתובת: ${address}`,
@@ -8208,7 +8668,7 @@ async function notifyNewOrder(o) {
       city: o.city || "",
       region: o.region || "",
       address,
-      pricing_zone: zone ? zone.short : "",
+      pricing_zone: zone ? zoneLabelFor(o.city) : "",
       doc_type: docType || "",
       case_number: o.caseNumber || "",
       court: o.court || "",
@@ -8217,7 +8677,7 @@ async function notifyNewOrder(o) {
       addons: [o.addons && o.addons.tracing ? "איתור כתובת" : "", o.addons && o.addons.printing ? "הדפסת מסמכים" : ""].filter(Boolean).join(", "),
       notes: o.notes || "",
       price_total: String(price.total),
-      subject: `הזמנת מסירה חדשה ${o.id} — ${o.city || ""}`,
+      subject: `הזמנת מסירה חדשה ${formatOrderNum(o.id)} — ${o.city || ""}`,
       message,
     });
     await window.fetch(NEW_ORDER_WEBHOOK_URL, { method: "POST", mode: "no-cors", body, keepalive: true });
@@ -8296,7 +8756,7 @@ async function notifyAdminNewOrder(o) {
       doc_type: (o.docType === "אחר" && o.customDocType ? o.customDocType : o.docType) || "",
       urgent: o.urgent ? "yes" : "no",
       created_at: new window.Date().toISOString(),
-      message: `מסירה חדשה (אבא תודה)\nלקוח: ${o.submittedBy || ""}\nנמען: ${o.recipientName || ""}\nיעד: ${destination}\nמס' הזמנה: ${o.id}\nלשיבוץ שליח: ${assignUrl}`,
+      message: `מסירה חדשה (אבא תודה)\nלקוח: ${o.submittedBy || ""}\nנמען: ${o.recipientName || ""}\nיעד: ${destination}\nמס' הזמנה: ${formatOrderNum(o.id)}\nלשיבוץ שליח: ${assignUrl}`,
     });
     await window.fetch(COURIER_WEBHOOK_URL, { method: "POST", mode: "no-cors", body, keepalive: true });
     return true;
@@ -8751,6 +9211,54 @@ function useCloudStore(profile, setters) {
       return true;
     };
 
+    // Upgrade 3 — the owning lawyer's verification (license, date, signature,
+    // stamp). Lawyers cannot UPDATE orders (RLS), so it goes through the
+    // optional SECURITY DEFINER RPC in supabase/lawyer-actions.sql; admin may
+    // write the row directly. If neither is possible the verification is kept
+    // on this device only and the user is told.
+    const saveLawyerVerification = async (id, f) => {
+      const fields = {
+        ...f,
+        lawyerSignature: (await uploadEvidence(`${id}/lawyer-signature`, f.lawyerSignature)) || f.lawyerSignature,
+        lawyerStamp: (await uploadEvidence(`${id}/lawyer-stamp`, f.lawyerStamp)) || f.lawyerStamp,
+      };
+      const { error: e } = await supabase.rpc("lawyer_save_verification", { p_order_id: id, p_fields: fields });
+      if (!e) return { ok: true };
+      if (profileRef.current && profileRef.current.role === "admin") {
+        const { data: cur } = await supabase.from("orders").select("data").eq("id", id).maybeSingle();
+        const { error: e2 } = await supabase
+          .from("orders")
+          .update({ data: { ...((cur && cur.data) || {}), ...fields } })
+          .eq("id", id);
+        if (!e2) return { ok: true };
+      }
+      rememberLawyerVerification(id, f);
+      setError("אימות עורך הדין נשמר במכשיר זה בלבד. כדי לשמור אותו בשרת יש להריץ פעם אחת את supabase/lawyer-actions.sql ב-Supabase.");
+      return { ok: false };
+    };
+
+    // Upgrade 2 — permanent delete of a cancelled order. Visits first, then the
+    // order (visits also cascade). RLS allows this for admin only, so for a
+    // lawyer the direct delete removes 0 rows; we then try the optional
+    // SECURITY DEFINER RPC (supabase/lawyer-actions.sql). Returns
+    // { ok, hiddenOnly }: hiddenOnly = could not delete in the database, the
+    // order was only hidden for this user.
+    const deleteOrder = async (id) => {
+      const role = profileRef.current && profileRef.current.role;
+      await supabase.from("visits").delete().eq("order_id", id);
+      const { data, error: e } = await supabase.from("orders").delete().eq("id", id).select("id");
+      if (!e && data && data.length) return { ok: true };
+      if (role === "admin") {
+        if (e) setError(e.message || String(e));
+        dirtyRef.current = true;
+        refreshOrders();
+        return { ok: false };
+      }
+      const { error: e2 } = await supabase.rpc("lawyer_delete_cancelled_order", { p_order_id: id });
+      if (!e2) return { ok: true };
+      return { ok: false, hiddenOnly: true };
+    };
+
     // Admin: block / restore a user. The SQL function updates the row by id AND
     // by e-mail (so a pre-registered twin of the same address is covered).
     const setUserBlocked = async (userId, blocked) => {
@@ -8770,7 +9278,10 @@ function useCloudStore(profile, setters) {
         setError((e && e.message) || "לא ניתן להפיק מספר הזמנה");
         return null;
       }
-      return data;
+      // The sequence is global (a lawyer only sees their own orders, so a
+      // client-side "max + 1" could collide) — only the legacy "ORD-" prefix
+      // is dropped, giving strictly consecutive plain numbers.
+      return orderNumberOf(data);
     };
 
     // A courier's own "take" / "decline" on an open order. The row's primary
@@ -8878,6 +9389,8 @@ function useCloudStore(profile, setters) {
       refreshSettings,
       persistOrders,
       cancelOrder,
+      deleteOrder,
+      saveLawyerVerification,
       setUserBlocked,
       nextOrderId,
       refreshLawyers,
@@ -9792,7 +10305,15 @@ function AppShell({ profile, onSignOut }) {
   // Cloud store: loads the role-scoped data, subscribes to Realtime and saves
   // changes (a no-op in demo mode, where `profile` is null).
   const cloud = useCloudStore(profile, {
-    replaceOrders: (list) => {
+    replaceOrders: (rawList) => {
+      // Orders this user deleted permanently stay gone even if the database
+      // could not remove them (see deleteOrder → hiddenOnly).
+      const hidden = readHiddenOrderIds();
+      const visible = hidden.size ? rawList.filter((o) => !hidden.has(o.id)) : rawList;
+      const localVerify = readLocalVerifications();
+      const list = Object.keys(localVerify).length
+        ? visible.map((o) => (localVerify[o.id] && !o.lawyerVerifiedAt ? { ...o, ...localVerify[o.id] } : o))
+        : visible;
       ordersRef.current = list;
       setOrdersState(list);
     },
@@ -9806,6 +10327,8 @@ function AppShell({ profile, onSignOut }) {
   });
   const persistOrders = cloud.persistOrders;
   const cloudCancelOrder = cloud.cancelOrder;
+  const cloudDeleteOrder = cloud.deleteOrder;
+  const cloudSaveLawyerVerification = cloud.saveLawyerVerification;
   const cloudNextOrderId = cloud.nextOrderId;
   const cloudSetUserBlocked = cloud.setUserBlocked;
   const cloudRespond = cloud.respondToOrder;
@@ -9851,7 +10374,7 @@ function AppShell({ profile, onSignOut }) {
         key: v.key,
         orderId: v.o.id,
         lawyer: v.o.submittedBy,
-        message: `עדכון בזמן אמת: ביקור ${v.i + 1} (${v.a.type}) בוצע עבור מס' משימה ${v.o.id} — ${v.a.timestamp}`,
+        message: `עדכון בזמן אמת: ביקור ${v.i + 1} (${v.a.type}) בוצע עבור מס' משימה ${formatOrderNum(v.o.id, true)} — ${v.a.timestamp}`,
         createdAt: v.a.timestamp || nowStamp(0),
         read: false,
       }));
@@ -9993,6 +10516,34 @@ function AppShell({ profile, onSignOut }) {
     if (cloudOn) cloudCancelOrder(id);
     return true;
   }, [cloudOn, cloudCancelOrder, setOrders]);
+
+  // Upgrade 2 — permanently delete a CANCELLED order: local state at once, then
+  // visits + order in Supabase (admin directly; lawyer via the optional RPC,
+  // otherwise the order is hidden for that user only).
+  const handleDeleteOrderPermanently = useCallback((orderId) => {
+    const current = ordersRef.current.find((o) => o.id === orderId);
+    if (!current || !isOrderCancelled(current)) return false;
+    setOrders((prev) => prev.filter((o) => o.id !== orderId), { localOnly: true });
+    setNotifications((prev) => prev.filter((n) => n.orderId !== orderId));
+    if (cloudOn) {
+      cloudDeleteOrder(orderId).then((r) => {
+        if (r && r.hiddenOnly) rememberHiddenOrderId(orderId);
+      });
+    }
+    return true;
+  }, [cloudOn, cloudDeleteOrder, setOrders]);
+
+  // Upgrade 3 — save the owning lawyer's verification onto the order. Only the
+  // lawyer portal passes this handler (couriers / admin never get it) and the
+  // order must be one this lawyer can see; the database re-checks ownership.
+  const handleLawyerVerify = useCallback(async (orderId, fields) => {
+    if (profile && profile.role && profile.role !== "lawyer" && profile.role !== "admin") return false;
+    const current = ordersRef.current.find((o) => o.id === orderId);
+    if (!current) return false;
+    setOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, ...fields } : o)), { localOnly: true });
+    if (cloudOn) await cloudSaveLawyerVerification(orderId, fields);
+    return true;
+  }, [cloudOn, profile, cloudSaveLawyerVerification, setOrders]);
 
   const handleUpdateOrder = useCallback((id, updater) => {
     setOrders((prev) => prev.map((o) => (o.id === id ? updater(o) : o)));
@@ -10245,6 +10796,8 @@ function AppShell({ profile, onSignOut }) {
           orders={orders}
           onCreate={handleCreate}
           onCancelOrder={handleCancelOrder}
+          onDeleteOrder={handleDeleteOrderPermanently}
+          onLawyerVerify={handleLawyerVerify}
           onSwitchRole={setView}
           notifications={notifications}
           onReadNotification={handleReadNotification}
@@ -10295,6 +10848,7 @@ function AppShell({ profile, onSignOut }) {
           onEnableNotify={alerts.requestPermission}
           onTestNotify={alerts.sendTest}
           onSignAffidavit={handleAdminSignAffidavit}
+          onDeleteOrder={handleDeleteOrderPermanently}
         />
       )}
     </div>
