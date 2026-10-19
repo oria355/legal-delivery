@@ -3221,7 +3221,7 @@ function EvidenceThumb({ src, label, name }) {
 
 // One finished delivery: every saved photo, the recipient's signature, the
 // courier's signed affidavit and the affidavit / certificate button.
-function HistoryOrderCard({ o, onOpenAffidavit }) {
+function HistoryOrderCard({ o, onOpenAffidavit, onDeletePermanently }) {
   const visits = o.attempts || [];
     const sig = visits.map((a) => a.signatureDataUrl).filter(Boolean).pop() || (typeof o.signature === "string" && o.signature !== "SIGNED" ? o.signature : null);
     return (
@@ -3264,15 +3264,28 @@ function HistoryOrderCard({ o, onOpenAffidavit }) {
             ))}
           </ul>
         )}
-        {isAffidavitSigned(o) && onOpenAffidavit && (
-          <button
-            type="button"
-            onClick={() => onOpenAffidavit(o.id)}
-            className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200 hover:bg-indigo-100"
-          >
-            <FileText className="h-3.5 w-3.5" /> {usesAffidavit(o) ? "צפייה בתצהיר החתום" : "צפייה באישור המסירה"}
-          </button>
-        )}
+        <div className="mt-3 flex flex-wrap items-center gap-2 empty:hidden">
+          {isAffidavitSigned(o) && onOpenAffidavit && (
+            <button
+              type="button"
+              onClick={() => onOpenAffidavit(o.id)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200 hover:bg-indigo-100"
+            >
+              <FileText className="h-3.5 w-3.5" /> {usesAffidavit(o) ? "צפייה בתצהיר החתום" : "צפייה באישור המסירה"}
+            </button>
+          )}
+          {onDeletePermanently && (
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm(`למחוק לצמיתות את ההזמנה ${formatOrderNum(o.id)} (${o.recipientName}) מההיסטוריה? ההזמנה, התמונות והתצהיר יימחקו ולא ניתן לשחזר.`)) onDeletePermanently(o.id);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100"
+            >
+              🗑️ מחק לצמיתות
+            </button>
+          )}
+        </div>
       </section>
     );
 }
@@ -3290,7 +3303,7 @@ function orderMonthKey(o) {
 // "היסטוריה": "ריכוז חודשים — כל חודש בנפרד". One card per calendar month
 // (always including the current one) with its delivery count, total cost and
 // its own CSV export; opening a month shows that month's delivery cards.
-function OrderHistoryList({ orders, onOpenAffidavit }) {
+function OrderHistoryList({ orders, onOpenAffidavit, onDeletePermanently }) {
   const currentMonthKey = nowStamp(0).slice(0, 7);
   const [selected, setSelected] = useState(currentMonthKey);
   const finished = useMemo(() => orders.filter((o) => isOrderCompleted(o)), [orders]);
@@ -3334,19 +3347,34 @@ function OrderHistoryList({ orders, onOpenAffidavit }) {
                   </span>
                 </span>
               </button>
-              <button
-                type="button"
-                disabled={!list.length}
-                onClick={() => exportOrdersCsv(list, `מסירות-${key}.csv`)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                📥 ייצוא חודש לאקסל (CSV)
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={!list.length}
+                  onClick={() => exportOrdersCsv(list, `מסירות-${key}.csv`)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  📥 ייצוא חודש לאקסל (CSV)
+                </button>
+                {onDeletePermanently && open && list.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm(`למחוק לצמיתות את כל ${list.length} ההזמנות של ${monthLabel(key)} מההיסטוריה? ההזמנות, התמונות והתצהירים יימחקו ולא ניתן לשחזר.`)) {
+                        list.forEach((o) => onDeletePermanently(o.id));
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100"
+                  >
+                    🗑️ מחק היסטוריית חודש לצמיתות
+                  </button>
+                )}
+              </div>
             </div>
             {open && (
               <div className="space-y-4 border-t border-slate-100 p-4">
                 {list.length ? (
-                  list.map((o) => <HistoryOrderCard key={o.id} o={o} onOpenAffidavit={onOpenAffidavit} />)
+                  list.map((o) => <HistoryOrderCard key={o.id} o={o} onOpenAffidavit={onOpenAffidavit} onDeletePermanently={onDeletePermanently} />)
                 ) : (
                   <p className="py-6 text-center text-sm text-slate-400">אין מסירות שהושלמו בחודש זה</p>
                 )}
@@ -3770,7 +3798,7 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onDeleteOrder, onLawyer
         {tab === "history" && (
           <div className="space-y-3">
             <CsvExportButton orders={myOrders.filter(isOrderCompleted)} filename="היסטוריית-מסירות.csv" />
-            <OrderHistoryList orders={myOrders} onOpenAffidavit={setAffidavitId} />
+            <OrderHistoryList orders={myOrders} onOpenAffidavit={setAffidavitId} onDeletePermanently={onDeleteOrder ? (id) => { onDeleteOrder(id); setSelectedId(null); } : undefined} />
           </div>
         )}
 
@@ -6767,15 +6795,27 @@ function CourierPayroll({
                     <td className="px-3 py-2.5 font-semibold text-indigo-700">{formatILS(r.total)}</td>
                     <td className="px-3 py-2.5">
                       <button
-                        onClick={() => onTogglePayment(r.courier, month)}
+                        type="button"
+                        disabled={r.status === "paid"}
+                        title={r.status === "paid" ? "התשלום ננעל כ'שולם' ולא ניתן לשינוי" : ""}
+                        onClick={() => {
+                          // One-way: a paid month can never go back to unpaid.
+                          if (r.status === "paid") return;
+                          if (
+                            window.confirm(
+                              "האם שילמת לשליח בוודאות את השכר בסך " + formatILS(r.total) + "?\nשים לב: לאחר לחיצה על אישור, סטטוס התשלום יינעל כ'שולם' לצמיתות ולא יהיה ניתן לשינוי."
+                            )
+                          ) {
+                            onTogglePayment(r.courier, month);
+                          }
+                        }}
                         className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium leading-4 ring-1 ring-inset transition ${
                           r.status === "paid"
-                            ? "bg-emerald-50 text-emerald-700 ring-emerald-200 hover:bg-emerald-100"
+                            ? "cursor-not-allowed bg-emerald-50 text-emerald-700 ring-emerald-200"
                             : "bg-amber-50 text-amber-700 ring-amber-200 hover:bg-amber-100"
                         }`}
                       >
-                        {r.status === "paid" ? <Lock className="h-3 w-3" /> : <Unlock className="h-3 w-3" />}
-                        {r.status === "paid" ? "שולם" : "לא שולם"}
+                        {r.status === "paid" ? "🔒 שולם" : "🔓 לא שולם"}
                       </button>
                     </td>
                     <td className="px-3 py-2.5 print:hidden">
@@ -6835,7 +6875,7 @@ function CourierPayroll({
                             onClick={() => setAdjustmentTarget(r.courier)}
                             disabled={r.status === "paid"}
                             className="flex items-center gap-1 text-xs font-medium text-indigo-700 hover:underline disabled:cursor-not-allowed disabled:text-slate-300 disabled:no-underline"
-                            title={r.status === "paid" ? "יש לסמן כ'לא שולם' לפני עריכת התאמות" : ""}
+                            title={r.status === "paid" ? "החודש שולם ונעול — לא ניתן לערוך התאמות" : ""}
                           >
                             <PlusCircle className="h-3.5 w-3.5" /> הוספת התאמה
                           </button>
@@ -7718,6 +7758,20 @@ function AdminDashboard({
             🗑️ מחק את כל המבוטלות לצמיתות
           </button>
         )}
+        {activeFilter === "completed" && onDeleteOrder && filteredOrders.some(isOrderCompleted) && (
+          <button
+            type="button"
+            onClick={() => {
+              const done = filteredOrders.filter(isOrderCompleted);
+              if (window.confirm(`למחוק לצמיתות את כל ${done.length} ההזמנות שהושלמו? כולל התיעוד, התמונות והתצהירים. לא ניתן לשחזר.`)) {
+                done.forEach((o) => onDeleteOrder(o.id));
+              }
+            }}
+            className="rounded-lg bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-700"
+          >
+            🗑️ מחק את כל ההזמנות שהושלמו לצמיתות
+          </button>
+        )}
         <CsvExportButton orders={filteredOrders} filename="דוח-מסירות-מנהל.csv" />
       </div>
       {activeFilter === "completed" && <MarginSummary orders={filteredOrders} pricing={pricing} />}
@@ -7896,7 +7950,7 @@ function AdminDashboard({
                               <ScrollText className="h-3.5 w-3.5" /> {usesAffidavit(o) ? "הפקת תצהיר וחתימה" : "אישור מסירה רשמי"}
                             </button>
                           ) : null}
-                          {isOrderCancelled(o) && onDeleteOrder && (
+                          {(isOrderCancelled(o) || isOrderCompleted(o) || activeFilter === "completed") && onDeleteOrder && (
                             <button
                               onClick={() => {
                                 if (window.confirm(`למחוק לצמיתות את ההזמנה ${formatOrderNum(o.id)}? לא ניתן לשחזר.`)) onDeleteOrder(o.id);
@@ -10522,16 +10576,21 @@ function AppShell({ profile, onSignOut }) {
   // otherwise the order is hidden for that user only).
   const handleDeleteOrderPermanently = useCallback((orderId) => {
     const current = ordersRef.current.find((o) => o.id === orderId);
-    if (!current || !isOrderCancelled(current)) return false;
+    if (!current) return false;
+    // Cancelled or completed orders only, and only for the admin or the owning
+    // lawyer (a lawyer sees nothing but their own orders). Never a courier.
+    if (!isOrderCancelled(current) && !isOrderCompleted(current)) return false;
+    if (cloudOn && !(profile && (profile.role === "admin" || profile.role === "lawyer"))) return false;
     setOrders((prev) => prev.filter((o) => o.id !== orderId), { localOnly: true });
     setNotifications((prev) => prev.filter((n) => n.orderId !== orderId));
     if (cloudOn) {
-      cloudDeleteOrder(orderId).then((r) => {
-        if (r && r.hiddenOnly) rememberHiddenOrderId(orderId);
-      });
+      // Always remembered as hidden: even if row-level security refuses the
+      // real delete, the order is gone for this user immediately and for good.
+      rememberHiddenOrderId(orderId);
+      cloudDeleteOrder(orderId);
     }
     return true;
-  }, [cloudOn, cloudDeleteOrder, setOrders]);
+  }, [cloudOn, profile, cloudDeleteOrder, setOrders]);
 
   // Upgrade 3 — save the owning lawyer's verification onto the order. Only the
   // lawyer portal passes this handler (couriers / admin never get it) and the
@@ -10750,17 +10809,26 @@ function AppShell({ profile, onSignOut }) {
     setPayments((prev) => {
       const key = paymentKey(courier, monthKey);
       const current = prev[key] || "unpaid";
-      return { ...prev, [key]: current === "paid" ? "unpaid" : "paid" };
+      // Irreversible: paid stays paid (no way back to "unpaid").
+      if (current === "paid") return prev;
+      return { ...prev, [key]: "paid" };
     });
   }, []);
 
+  // Once a courier/month is paid its amount is frozen: no adding or removing
+  // manual adjustments for it.
   const handleAddAdjustment = useCallback((adj) => {
+    if (payments[paymentKey(adj.courier, adj.monthKey)] === "paid") return;
     setAdjustments((prev) => [...prev, { id: genId("ADJ"), createdAt: nowStamp(0), ...adj }]);
-  }, []);
+  }, [payments]);
 
   const handleRemoveAdjustment = useCallback((id) => {
-    setAdjustments((prev) => prev.filter((a) => a.id !== id));
-  }, []);
+    setAdjustments((prev) => {
+      const a = prev.find((x) => x.id === id);
+      if (a && payments[paymentKey(a.courier, a.monthKey)] === "paid") return prev;
+      return prev.filter((x) => x.id !== id);
+    });
+  }, [payments]);
 
   if (cloudOn && !cloud.ready) return <FullScreenLoader text="טוען נתונים מהענן..." />;
 
