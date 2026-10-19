@@ -85,6 +85,9 @@ const DELIVERY_TRACKS = {
   legal: { key: "legal", label: "⚖️ מסירה משפטית (תקנה 161 — עד 3 ביקורים + תצהיר)", badge: "⚖️ מסירה משפטית", tone: "bg-indigo-50 text-indigo-700 ring-indigo-200" },
   municipal: { key: "municipal", label: "🏛️ מסירה לעיריות ורשויות (מכרזים / התראות / צווים)", badge: "🏛️ מסירה מוסדית/עירייה", tone: "bg-teal-50 text-teal-700 ring-teal-200" },
   standard: { key: "standard", label: "📦 מסירה רגילה / עסקית לחברות (ביקור יחיד מהיר)", badge: "📦 מסירה רגילה", tone: "bg-slate-100 text-slate-700 ring-slate-200" },
+  // Banks / financial institutions: personal delivery to the addressee only,
+  // with mandatory ID verification (type + last 4 digits). No door posting.
+  bank: { key: "bank", label: "🏦 מסירה בנקאית / מאובטחת (זיהוי ת\"ז חובה · לנמען בלבד)", badge: "🏦 מסירה בנקאית — לנמען בלבד", tone: "bg-sky-50 text-sky-800 ring-sky-200" },
 };
 // Who received the document (Regulation 163(b)) and how residence was verified
 // before posting on the door (Regulation 161(4)(b)(2)).
@@ -101,9 +104,9 @@ const RESIDENCE_VERIFY = {
 const MUNICIPAL_DOC_TYPES = ["התראת ארנונה / גבייה", "צו עירוני / הנדסה", "מכתב רשמי / מכרז", "אחר"];
 function trackOf(o) {
   const t = o && o.deliveryTrack;
-  return t === "municipal" || t === "standard" ? t : "legal";
+  return t === "municipal" || t === "standard" || t === "bank" ? t : "legal";
 }
-// Legal = 3, standard = 1, municipal = the chosen 1 or 3 (default 1).
+// Legal = 3, standard = 1, municipal / bank = the chosen 1 or 3 (default 1).
 function maxVisitsOf(o) {
   const t = trackOf(o);
   if (t === "legal") return 3;
@@ -116,7 +119,37 @@ function isSingleVisit(o) {
 // Documents with a court-style affidavit: legal orders, and municipal
 // statutory (3-visit) deliveries.
 function usesAffidavit(o) {
-  return trackOf(o) === "legal" || (trackOf(o) === "municipal" && maxVisitsOf(o) === 3);
+  return trackOf(o) === "legal" || ((trackOf(o) === "municipal" || trackOf(o) === "bank") && maxVisitsOf(o) === 3);
+}
+
+// ---- Bank track (בנק ישראל / סודיות בנקאית) -------------------------------
+// Only the addressee himself, or an identified corporate signatory, may take
+// the envelope. Stored in orders.data.deliveryTrack = "bank" and, per visit,
+// visits.data.verifiedIdType / verifiedIdLast4 — no SQL change.
+const DELIVERED_TO_BANK = {
+  self: "הנמען בעצמו (זיהוי אישי בתעודה מזהה)",
+  authorized: "מורשה חתימה מזוהה בתאגיד",
+};
+const ID_DOC_TYPES = ["תעודת זהות", "דרכון", "רישיון נהיגה"];
+const BANK_DOC_TYPES = ["מסמכי אשראי / משכנתא לחתימה", "ערבות בנקאית / שיק בנקאי", "התראה בנקאית רשומה", "אחר"];
+const BANK_MASK_TEXT = "🔒 מעטפה בנקאית חסויה";
+// Bank confidentiality: the courier must not see what is inside the envelope.
+function isBankConfidential(o) {
+  return !!o && ((trackOf(o) === "bank" && o.bankConfidential !== false) || o.bankConfidential === true);
+}
+// Courier-facing copy of an order: document type and reference are hidden.
+// (The real order is never changed; admin and the owning client see everything.)
+function maskOrderForCourier(o) {
+  if (!isBankConfidential(o)) return o;
+  return { ...o, docType: BANK_MASK_TEXT, customDocType: "", caseNumber: BANK_MASK_TEXT, fileName: "" };
+}
+function courierDocLabel(o) {
+  if (isBankConfidential(o)) return BANK_MASK_TEXT;
+  return o.docType === "אחר" && o.customDocType ? o.customDocType : o.docType;
+}
+// "סוג תעודה מזהה: … · 4 ספרות אחרונות: …" for a visit that recorded it.
+function idVerificationText(a) {
+  return a && a.verifiedIdType ? `סוג תעודה מזהה: ${a.verifiedIdType} · 4 ספרות אחרונות: ${a.verifiedIdLast4 || "—"}` : "";
 }
 
 const DOC_TYPES = [
@@ -1664,7 +1697,79 @@ function receiverStatement(a) {
   if (!a || !a.deliveredToType) return "";
   return `המסמך נמסר ל${escHtml(a.deliveredToType)}${
     a.receiverName ? `: <strong>${escHtml(a.receiverName)}</strong>${a.receiverRelation ? ` (${escHtml(a.receiverRelation)})` : ""}` : ""
-  }.`;
+  }.${a.verifiedIdType ? ` זהות הנמען אומתה בתעודה מזהה — ${escHtml(idVerificationText(a))}.` : ""}`;
+}
+
+// ---- Chain of custody (שרשרת משמורת) ---------------------------------------
+// Registered / legal / bank deliveries keep a documented timeline. Stored in
+// orders.data: pickedUpAt, pickedUpBy, custodyLog[]. Step 2 falls back to the
+// assignment time (or first visit) if nobody pressed the pick-up button.
+function needsCustody(o) {
+  return !!o && trackOf(o) !== "standard";
+}
+function markPickedUp(o, by, role) {
+  if (!o || o.pickedUpAt) return o;
+  const at = nowStamp(0);
+  return {
+    ...o,
+    pickedUpAt: at,
+    pickedUpBy: by || "",
+    custodyLog: [...(o.custodyLog || []), { event: "picked_up", at, by: by || "", role: role || "" }],
+  };
+}
+function buildCustodyChain(o) {
+  const att = (o.attempts || []).filter((a) => !a.synthetic);
+  const gpsOf = (a) => (a.lat != null && a.lng != null ? `${a.lat}, ${a.lng}` : a.gpsMissing ? "ללא GPS" : a.location || "ללא GPS");
+  const steps = [];
+  steps.push({ n: 1, label: "פתיחת הזמנה במערכת", at: o.createdDate || o.createdAt || "", detail: o.submittedBy || "" });
+  let pickAt = o.pickedUpAt || "";
+  let detail = o.pickedUpBy ? `נקלט על ידי ${o.pickedUpBy}` : "";
+  if (!pickAt) {
+    if (o.assignedAt) {
+      pickAt = o.assignedAt;
+      detail = "מולא אוטומטית לפי שיבוץ השליח";
+    } else if (att[0]) {
+      pickAt = att[0].timestamp || "";
+      detail = "מולא אוטומטית לפי הביקור הראשון";
+    }
+  }
+  steps.push({ n: 2, label: "קליטת מעטפה / איסוף לשליח", at: pickAt, detail, pending: !pickAt });
+  steps.push({
+    n: 3,
+    label: "ניסיונות מסירה בשטח",
+    at: "",
+    detail: att.length ? "" : "טרם בוצעו ביקורים",
+    pending: !att.length,
+    items: att.map((a, i) => ({ at: a.timestamp || "", text: `ביקור ${i + 1} — ${a.type}`, gps: gpsOf(a) })),
+  });
+  const last = att[att.length - 1];
+  const finished = last && (last.type === STATUS.DELIVERED || last.type === STATUS.REFUSED || last.type === STATUS.POSTED);
+  const signedAt = o.affidavit && o.affidavit.signedAt;
+  steps.push({
+    n: 4,
+    label: "סיום מסירה וחתימה",
+    at: finished ? last.timestamp || o.completedAt || "" : "",
+    detail: finished ? `${last.type}${signedAt ? ` · חתימת השליח על המסמך ב-${signedAt}` : ""}` : "טרם הסתיימה",
+    pending: !finished,
+  });
+  return steps;
+}
+function custodyHtml(o) {
+  if (!needsCustody(o)) return "";
+  const li = (st) =>
+    `<li><strong>${st.n}. ${escHtml(st.label)}:</strong> ${
+      st.pending && !st.at ? `<span style="color:#9ca3af">${escHtml(st.detail || "טרם התבצע")}</span>` : `${escHtml(st.at)}${st.detail ? ` — ${escHtml(st.detail)}` : ""}`
+    }${
+      st.items && st.items.length
+        ? `<ul style="margin:2px 0 0;padding-right:18px">${st.items
+            .map((it) => `<li>${escHtml(it.text)} · ${escHtml(it.at)} · GPS: <span dir="ltr">${escHtml(it.gps)}</span></li>`)
+            .join("")}</ul>`
+        : ""
+    }</li>`;
+  return `<div style="margin-top:18px;border:1px solid #9ca3af;padding:10px 14px;page-break-inside:avoid;font-size:12.5px">
+    <h3 style="margin:0 0 6px;font-size:14px">שרשרת משמורת (Chain of Custody)</h3>
+    <ol style="margin:0;padding-right:20px;list-style:none">${buildCustodyChain(o).map(li).join("")}</ol>
+  </div>`;
 }
 
 // Upgrade 3 — lawyer verification helpers.
@@ -1899,6 +2004,8 @@ function buildAffidavitHtml(order, kind) {
     </div>
   </div>
 
+  ${custodyHtml(order)}
+
   <div class="verify">
     <h2>אימות עורך דין</h2>
     <p>
@@ -1933,7 +2040,7 @@ function buildDeliveryCertificateHtml(order) {
   const last = real[real.length - 1] || attempts[attempts.length - 1] || {};
   const t = DELIVERY_TRACKS[trackOf(order)];
   const fullAddress = `${order.street || ""} ${order.houseNumber || ""}${order.apartment ? `, דירה ${order.apartment}` : ""}, ${order.city || ""}`;
-  const isAuthority = trackOf(order) === "municipal";
+  const isAuthority = trackOf(order) === "municipal" || trackOf(order) === "bank";
   const clientName = order.submittedBy || "—";
   const sig = real.map((a) => a.signatureDataUrl).filter(Boolean).pop() || (typeof order.signature === "string" && order.signature !== "SIGNED" ? order.signature : "");
   const courierSig = order.affidavit && order.affidavit.signature;
@@ -1966,18 +2073,20 @@ function buildDeliveryCertificateHtml(order) {
   <table>
     ${row("מס' הזמנה", escHtml(formatOrderNum(order.id)))}
     ${row("סוג מסירה", escHtml(t.badge))}
-    ${row(isAuthority ? "הרשות / הלקוח" : "לקוח", escHtml(isAuthority && order.court ? `${order.court} (${clientName})` : clientName))}
+    ${row(trackOf(order) === "bank" ? "הבנק / המוסד הפיננסי / סניף" : isAuthority ? "הרשות / הלקוח" : "לקוח", escHtml(isAuthority && order.court ? `${order.court} (${clientName})` : clientName))}
     ${row("מספר אסמכתא", escHtml(order.caseNumber || "—"))}
     ${row("נמען", escHtml(order.recipientName || "—"))}
     ${row("כתובת", escHtml(fullAddress))}
     ${row("מסמך / חבילה", escHtml(order.docType === "אחר" ? order.customDocType || "אחר" : order.docType || "—"))}
     ${row("סטטוס מסירה", escHtml(order.status || "—"))}
     ${row("אופן המסירה", escHtml(last.notes || "—"))}
+    ${last.verifiedIdType ? row("אימות זהות הנמען", escHtml(idVerificationText(last))) : ""}
     ${last.deliveredToType ? row("נמסר ל", `${escHtml(last.deliveredToType)}${last.receiverName ? ` — ${escHtml(last.receiverName)}${last.receiverRelation ? ` (${escHtml(last.receiverRelation)})` : ""}` : ""}`) : ""}
     ${row("תאריך ושעה מדויקים", escHtml(exact))}
     ${row("קואורדינטות GPS", `<span dir="ltr">${escHtml(gps)}</span>`)}
     ${row("שליח", escHtml(order.assignedCourier || last.courier || "—"))}
   </table>
+  ${custodyHtml(order)}
   <h3>תמונות מהביקור</h3>
   <div>${photos || '<p class="meta">לא צורפו תמונות.</p>'}</div>
   <div class="sigs">
@@ -2006,6 +2115,476 @@ function downloadAffidavit(order, kind) {
   setTimeout(() => window.URL.revokeObjectURL(url), 1000);
 }
 
+// ---------------------------------------------------------------------------
+// Printable envelope label ("🏷️ מדבקת ברקוד") — registered-mail style waybill.
+// Code-128 (subset B) stripes are generated here as plain SVG: no library, no
+// network. The pattern table is the standard Code-128 table (widths of
+// bar/space/bar/space/bar/space; the stop code has 7 elements).
+// ---------------------------------------------------------------------------
+const CODE128_PATTERNS = ["212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213", "221312", "231212", "112232", "122132", "122231", "113222", "123122", "123221", "223211", "221132", "221231", "213212", "223112", "312131", "311222", "321122", "321221", "312212", "322112", "322211", "212123", "212321", "232121", "111323", "131123", "131321", "112313", "132113", "132311", "211313", "231113", "231311", "112133", "112331", "132131", "113123", "113321", "133121", "313121", "211331", "231131", "213113", "213311", "213131", "311123", "311321", "331121", "312113", "312311", "332111", "314111", "221411", "431111", "111224", "111422", "121124", "121421", "141122", "141221", "112214", "112412", "122114", "122411", "142112", "142211", "241211", "221114", "413111", "241112", "134111", "111242", "121142", "121241", "114212", "124112", "124211", "411212", "421112", "421211", "212141", "214121", "412121", "111143", "111341", "131141", "114113", "114311", "411113", "411311", "113141", "114131", "311141", "411131", "211412", "211214", "211232", "2331112"];
+// Returns the run-length string (digits) for Code-128B of `text`, including
+// start, checksum and stop. Characters outside printable ASCII become "-".
+function code128Runs(text) {
+  const chars = Array.from(String(text == null ? "" : text)).map((ch) => {
+    const c = ch.charCodeAt(0);
+    return c >= 32 && c <= 126 ? ch : "-";
+  });
+  const codes = [104];
+  let sum = 104;
+  chars.forEach((ch, i) => {
+    const v = ch.charCodeAt(0) - 32;
+    codes.push(v);
+    sum += v * (i + 1);
+  });
+  codes.push(sum % 103);
+  codes.push(106);
+  return codes.map((c) => CODE128_PATTERNS[c]).join("");
+}
+function code128Svg(text, { height = 70, module = 2 } = {}) {
+  const runs = code128Runs(text);
+  const quiet = 10 * module;
+  let x = quiet;
+  let bars = "";
+  for (let i = 0; i < runs.length; i += 1) {
+    const w = Number(runs[i]) * module;
+    if (i % 2 === 0) bars += `<rect x="${x}" y="0" width="${w}" height="${height}" />`;
+    x += w;
+  }
+  const total = x + quiet;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${total} ${height}" width="100%" height="${height}" preserveAspectRatio="none" shape-rendering="crispEdges" role="img" aria-label="ברקוד ${escHtml(text)}"><rect width="${total}" height="${height}" fill="#fff"/><g fill="#000">${bars}</g></svg>`;
+}
+// Short human-checkable code printed under the barcode (FNV-1a hash of the
+// order id + recipient + creation time) — lets a clerk confirm the sticker
+// belongs to the order. It is a verification code, not a security token.
+function verificationCodeFor(order) {
+  const src = `${order.id}|${order.recipientName || ""}|${order.createdDate || ""}`;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < src.length; i += 1) {
+    h ^= src.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `VC-${h.toString(36).toUpperCase().padStart(7, "0").slice(-7)}`;
+}
+const WAYBILL_TRACK_LABEL = {
+  legal: "⚖️ מסירה משפטית",
+  bank: "🏦 מסירה בנקאית — לנמען בלבד",
+  municipal: "🏛️ דואר רשום מוסדי",
+  standard: "📦 מסירה רגילה",
+};
+function buildWaybillHtml(order) {
+  const track = trackOf(order);
+  const prof = order.lawyerInfo || LAWYER_PROFILES[order.submittedBy] || {};
+  const num = formatOrderNum(order.id, true);
+  const visits = maxVisitsOf(order);
+  const address = `${order.street || ""} ${order.houseNumber || ""}${order.apartment ? `/${order.apartment}` : ""}${order.floor ? `, קומה ${order.floor}` : ""}`.trim();
+  const senderLines = [order.submittedBy, track === "municipal" || track === "bank" ? order.court : prof.firm, prof.address, prof.phone].filter(Boolean);
+  const visitRow = (i) =>
+    `<tr><td>☐ ביקור ${i}</td><td>תאריך ושעה: ____ / ____ / ______ &nbsp; ____ : ____</td><td>☐ נמסר &nbsp;☐ אין מענה${track === "bank" ? "" : visits === 3 && i === 3 ? " &nbsp;☐ הדבקה" : ""}</td></tr>`;
+  const rows = Array.from({ length: visits }, (_, i) => visitRow(i + 1)).join("");
+  return `<!DOCTYPE html>
+<html lang="he" dir="rtl"><head><meta charset="utf-8" /><title>מדבקת ברקוד ${escHtml(num)}</title>
+<style>
+  @page { size: 105mm 148mm; margin: 4mm; }
+  * { box-sizing: border-box; }
+  body { font-family: Heebo, Arial, sans-serif; color:#000; margin:0; padding:0; font-size: 10.5px; }
+  .label { border: 2px solid #000; padding: 6px 8px; }
+  .top { display:flex; justify-content:space-between; align-items:center; border-bottom:2px solid #000; padding-bottom:4px; margin-bottom:5px; }
+  .brand { font-weight:800; font-size: 12px; }
+  .badge { border:1.5px solid #000; border-radius:4px; padding:2px 6px; font-weight:700; font-size: 11px; }
+  .num { text-align:center; font-size: 30px; font-weight:800; letter-spacing: 1px; margin: 2px 0 0; }
+  .vc { text-align:center; font-size: 11px; letter-spacing: 2px; margin-bottom: 4px; }
+  .box { border:1px solid #000; padding:4px 6px; margin-top:5px; }
+  .box h4 { margin:0 0 2px; font-size:9.5px; text-transform:none; color:#444; }
+  .big { font-size: 15px; font-weight: 700; }
+  table { width:100%; border-collapse:collapse; margin-top:5px; }
+  td { border:1px solid #000; padding:3px 4px; font-size:9.5px; }
+  .meta { font-size: 9px; color:#444; margin-top:4px; display:flex; justify-content:space-between; }
+</style></head>
+<body>
+  <div class="label">
+    <div class="top"><span class="brand">מסירות משפטיות · דואר רשום</span><span class="badge">${escHtml(WAYBILL_TRACK_LABEL[track] || "")}</span></div>
+    ${code128Svg(num, { height: 70, module: 2 })}
+    <div class="num" dir="ltr">${escHtml(num)}</div>
+    <div class="vc" dir="ltr">${escHtml(verificationCodeFor(order))}</div>
+    <div class="box"><h4>שולח</h4>${senderLines.map((l) => escHtml(l)).join("<br />") || "—"}</div>
+    <div class="box"><h4>נמען</h4>
+      <div class="big">${escHtml(order.recipientName || "—")}</div>
+      ${escHtml(address)}<br />${escHtml(order.city || "")}<br />טלפון: <span dir="ltr">${escHtml(order.phone || "—")}</span>
+    </div>
+    <table>${rows}</table>
+    <div class="meta"><span>נוצר: ${escHtml(order.createdDate || "—")}</span><span>${visits === 1 ? "ביקור יחיד" : "עד 3 ביקורים בימים ובשעות שונים"}</span></div>
+  </div>
+</body></html>`;
+}
+// Opens the print-ready sticker in a popup; if popups are blocked the same
+// page is downloaded as an .html file instead.
+function printWaybillLabel(order) {
+  if (!order) return false;
+  const html = buildWaybillHtml(order);
+  const w = window.open("", "_blank", "width=520,height=760");
+  if (w && w.document) {
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    setTimeout(() => {
+      try {
+        w.focus();
+        w.print();
+      } catch (e) {
+        /* printing is best-effort — the page stays open for manual printing */
+      }
+    }, 400);
+    return true;
+  }
+  const blob = new window.Blob([html], { type: "text/html;charset=utf-8" });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `מדבקה-${formatOrderNum(order.id, true)}.html`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.URL.revokeObjectURL(url);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Bulk CSV import ("📤 ייבוא מסירות מאקסל (CSV)") — banks, municipalities,
+// law firms. Parsing and validation are pure functions; orders are created one
+// by one through the same handleCreate used by the order form.
+// ---------------------------------------------------------------------------
+const BULK_HEADERS = ["נמען", "ת.ז.", "עיר", "כתובת", "טלפון", "מסלול", "בית משפט/רשות/בנק", "מספר תיק/אסמכתא", "סוג מסמך", "הערות"];
+const BULK_MAX_ROWS = 300;
+const bulkNorm = (h) => String(h == null ? "" : h).replace(/[\s"'״׳`.\-_/\()]/g, "").toLowerCase();
+const BULK_FIELD_ALIASES = {
+  recipientName: ["נמען", "שםהנמען", "שם"],
+  idNumber: ["תז", "תעודתזהות", "מספרזהות", "זהות"],
+  city: ["עיר", "יישוב", "ישוב"],
+  address: ["כתובת", "רחוב", "כתובתמלאה"],
+  phone: ["טלפון", "נייד", "טל", "פלאפון"],
+  track: ["מסלול", "סוגמסירה"],
+  court: ["ביתמשפטרשותבנק", "ביתמשפט", "רשות", "בנק", "מוסד"],
+  caseNumber: ["מספרתיקאסמכתא", "מספרתיק", "אסמכתא", "מספראסמכתא"],
+  docType: ["סוגמסמך", "מסמך", "סוגהמסמך"],
+  notes: ["הערות", "הערה"],
+};
+// Bytes -> text. UTF-8 first (strict); if that fails the file is treated as
+// Windows-1255 (what Hebrew Excel writes for "CSV").
+function decodeCsvBuffer(buf) {
+  let text;
+  try {
+    text = new window.TextDecoder("utf-8", { fatal: true }).decode(buf);
+  } catch (e) {
+    text = new window.TextDecoder("windows-1255").decode(buf);
+  }
+  return text.replace(/^\uFEFF/, "");
+}
+// RFC-4180 style parser: quotes, doubled quotes, CR/LF, and a delimiter
+// (comma / semicolon / tab) detected from the first line.
+function parseCsvText(text) {
+  const firstLine = String(text).split(/\r?\n/, 1)[0] || "";
+  const count = (ch) => firstLine.split(ch).length - 1;
+  const delim = count("\t") > Math.max(count(","), count(";")) ? "\t" : count(";") > count(",") ? ";" : ",";
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let q = false;
+  const src = String(text);
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+    if (q) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') {
+          cell += '"';
+          i += 1;
+        } else q = false;
+      } else cell += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === delim) {
+      row.push(cell);
+      cell = "";
+    } else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && src[i + 1] === "\n") i += 1;
+      row.push(cell);
+      cell = "";
+      rows.push(row);
+      row = [];
+    } else cell += ch;
+  }
+  if (cell !== "" || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows.filter((r) => r.some((c) => String(c).trim() !== ""));
+}
+// City from a free-typed cell: exact match first, then a forgiving match that
+// ignores spaces / dashes / quotes ("באר-שבע", "תל אביב-יפו" -> "תל אביב").
+let bulkCityIndex = null;
+function bulkCityOf(raw) {
+  const direct = normalizeCity(raw);
+  if (direct) return direct;
+  if (!bulkCityIndex) {
+    bulkCityIndex = new window.Map();
+    CITIES.forEach((c) => {
+      const k = bulkNorm(c);
+      if (!bulkCityIndex.has(k)) bulkCityIndex.set(k, c);
+    });
+    bulkCityIndex.set("תלאביביפו", "תל אביב");
+  }
+  return bulkCityIndex.get(bulkNorm(raw)) || "";
+}
+// "הרצל 15/3" | "הרצל 15, דירה 3" | "דרך חיפה 8א" -> { street, houseNumber, apartment }
+function splitBulkAddress(raw) {
+  let a = String(raw || "").trim();
+  let apartment = "";
+  const apt = /[,\s]*דירה\s*(\d+\S*)\s*$/.exec(a);
+  if (apt) {
+    apartment = apt[1];
+    a = a.slice(0, apt.index).trim();
+  }
+  const m = /^(.*?\D)\s*(\d+[א-תa-zA-Z]?)(?:\s*[/\-]\s*(\d+))?\s*$/.exec(a.replace(/,\s*$/, ""));
+  if (!m) return { street: a, houseNumber: "", apartment };
+  return { street: m[1].replace(/[,\s]+$/, "").trim(), houseNumber: m[2], apartment: m[3] || apartment };
+}
+function bulkTrackOf(raw) {
+  const t = bulkNorm(raw);
+  if (!t) return "legal";
+  if (t.includes("בנק") || t.includes("bank")) return "bank";
+  if (t.includes("עיריי") || t.includes("רשות") || t.includes("מוסד") || t.includes("דואררשום") || t.includes("municipal")) return "municipal";
+  if (t.includes("רגיל") || t.includes("עסקי") || t.includes("standard")) return "standard";
+  return "legal";
+}
+// rows (first = header) -> [{ line, errors:[], form|null, price, track }]
+function bulkRowsToOrders(rows) {
+  if (!rows.length) return { items: [], missingColumns: ["נמען"] };
+  const head = rows[0].map(bulkNorm);
+  const col = {};
+  Object.keys(BULK_FIELD_ALIASES).forEach((k) => {
+    const i = head.findIndex((h) => BULK_FIELD_ALIASES[k].includes(h));
+    if (i >= 0) col[k] = i;
+  });
+  const missingColumns = ["recipientName", "city", "address", "phone"].filter((k) => col[k] == null).map((k) => BULK_FIELD_ALIASES[k][0]);
+  const get = (r, k) => (col[k] == null ? "" : String(r[col[k]] == null ? "" : r[col[k]]).trim());
+  const items = rows.slice(1, BULK_MAX_ROWS + 1).map((r, idx) => {
+    const errors = [];
+    const track = bulkTrackOf(get(r, "track"));
+    const city = bulkCityOf(get(r, "city"));
+    const addr = splitBulkAddress(get(r, "address"));
+    const recipientName = get(r, "recipientName");
+    const phone = get(r, "phone");
+    const idNumber = get(r, "idNumber");
+    if (!recipientName) errors.push("חסר שם נמען");
+    if (!city) errors.push(get(r, "city") ? "עיר לא מוכרת" : "חסרה עיר");
+    if (!addr.street || !addr.houseNumber) errors.push("כתובת: נדרשים רחוב ומספר בית");
+    if (!phone) errors.push("חסר טלפון");
+    if ((track === "legal" || track === "bank") && !idNumber) errors.push("חסרה ת.ז. (חובה במסלול זה)");
+    const list = track === "municipal" ? MUNICIPAL_DOC_TYPES : track === "bank" ? BANK_DOC_TYPES : DOC_TYPES;
+    const docRaw = get(r, "docType");
+    const known = list.find((d) => bulkNorm(d) === bulkNorm(docRaw));
+    let docType = known || (docRaw ? "אחר" : list[0]);
+    let customDocType = !known && docRaw ? docRaw : "";
+    let packageDescription = "";
+    if (track === "standard") {
+      packageDescription = docRaw || "משלוח עסקי";
+      docType = packageDescription;
+      customDocType = "";
+    }
+    const form = {
+      recipientName,
+      idNumber,
+      phone,
+      city: city || get(r, "city"),
+      street: addr.street,
+      houseNumber: addr.houseNumber,
+      apartment: addr.apartment,
+      floor: "",
+      entranceCode: "",
+      notes: get(r, "notes"),
+      docType,
+      customDocType,
+      fileName: "",
+      caseNumber: track === "standard" ? "" : get(r, "caseNumber"),
+      court: track === "standard" ? "" : get(r, "court"),
+      plaintiff: "",
+      defendant: "",
+      recipientRole: RECIPIENT_ROLES[0],
+      deliveryTrack: track,
+      maxVisits: track === "legal" ? 3 : 1,
+      bankConfidential: true,
+      packageDescription,
+      speed: "standard",
+      addons: { tracing: false, printing: false },
+      urgent: false,
+    };
+    return { line: idx + 2, errors, form: errors.length ? null : form, track, recipientName, city: city || get(r, "city"), price: city ? calcClientPrice({ ...form, city }).total : 0 };
+  });
+  return { items, missingColumns, truncated: rows.length - 1 > BULK_MAX_ROWS };
+}
+function bulkTemplateCsv() {
+  const example = [
+    ["יעקב פרידמן", "012345678", "חדרה", "הרצל 15/3", "050-1234567", "משפטי", "בית משפט השלום חדרה", 'ת"א 12345-06-25', "כתב תביעה", "להתקשר לפני"],
+    ["דנה לוי", "023456789", "נתניה", "ויצמן 7", "052-2345678", "בנק", "בנק לאומי — סניף נתניה", "A-5521", "מסמכי אשראי / משכנתא לחתימה", ""],
+    ["משה כהן", "", "תל אביב", "דיזנגוף 112", "054-3456789", "עירייה", "עיריית תל אביב — גבייה", "9988", "התראת ארנונה / גבייה", ""],
+  ];
+  const cell = (v) => `"${String(v).replace(/"/g, '""')}"`;
+  return "\uFEFF" + [BULK_HEADERS, ...example].map((r) => r.map(cell).join(",")).join("\r\n");
+}
+function downloadBulkTemplate() {
+  const blob = new window.Blob([bulkTemplateCsv()], { type: "text/csv;charset=utf-8" });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "תבנית-ייבוא-מסירות.csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.URL.revokeObjectURL(url);
+}
+
+// The import panel: choose a CSV -> preview (count, price per city, errors) ->
+// create all valid orders in one click. `owners` (admin only) lets the admin
+// pick which client the orders belong to.
+function BulkImportPanel({ onCreate, owners = null }) {
+  const [open, setOpen] = useState(false);
+  const [fileName, setFileName] = useState("");
+  const [parsed, setParsed] = useState(null);
+  const [readError, setReadError] = useState("");
+  const [ownerName, setOwnerName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(null);
+
+  const validItems = parsed ? parsed.items.filter((it) => it.form) : [];
+  const total = validItems.reduce((sum, it) => sum + it.price, 0);
+  const needsOwner = !!owners;
+  const ownerObj = needsOwner ? owners.find((o) => o.name === ownerName) || null : null;
+
+  const onFile = async (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    setDone(null);
+    setReadError("");
+    setParsed(null);
+    if (!f) return;
+    setFileName(f.name);
+    if (/\.xlsx?$/i.test(f.name)) {
+      setReadError('קובץ Excel (xlsx) אינו נתמך — ב-Excel בחרו "שמירה בשם" ← CSV ואז העלו שוב.');
+      return;
+    }
+    try {
+      const text = decodeCsvBuffer(await f.arrayBuffer());
+      setParsed(bulkRowsToOrders(parseCsvText(text)));
+    } catch (err) {
+      setReadError("לא ניתן לקרוא את הקובץ.");
+    }
+  };
+
+  const createAll = async () => {
+    if (busy || !validItems.length || (needsOwner && !ownerObj)) return;
+    setBusy(true);
+    let ok = 0;
+    for (const it of validItems) {
+      try {
+        // Sequential on purpose: each order takes the next consecutive number.
+        await onCreate(needsOwner ? { ...it.form, submittedBy: ownerObj.name, ownerLawyer: ownerObj } : it.form);
+        ok += 1;
+      } catch (err) {
+        /* keep going — the summary reports how many were created */
+      }
+    }
+    setBusy(false);
+    setDone({ ok, failed: validItems.length - ok });
+    setParsed(null);
+    setFileName("");
+  };
+
+  return (
+    <div className="rounded-2xl border border-slate-200/60 bg-white p-4 shadow-sm">
+      <button type="button" onClick={() => setOpen((v) => !v)} className="flex w-full items-center justify-between text-sm font-bold text-slate-700">
+        <span>📤 ייבוא מרוכז מאקסל (CSV) — בנקים, רשויות ומשרדי עורכי דין</span>
+        <ChevronDown className={`h-4 w-4 transition ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="mt-3 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-700">
+              📤 ייבוא מסירות מאקסל (CSV)
+              <input type="file" accept=".csv,text/csv" className="hidden" onChange={onFile} />
+            </label>
+            <button type="button" onClick={downloadBulkTemplate} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+              📄 הורד קובץ תבנית לדוגמה
+            </button>
+            {needsOwner && (
+              <select className={inputCls + " !w-auto"} value={ownerName} onChange={(e) => setOwnerName(e.target.value)} aria-label="עבור לקוח">
+                <option value="">עבור איזה לקוח / עורך דין?</option>
+                {owners.map((o) => (
+                  <option key={o.id || o.name} value={o.name}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-400">
+            עמודות: {BULK_HEADERS.join(" · ")}. מסלול: משפטי / בנק / עירייה / רגיל (ברירת מחדל: משפטי). נתמכים UTF-8 ו-Windows-1255, עד {BULK_MAX_ROWS} שורות.
+          </p>
+          {readError && <p className="rounded-lg bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">{readError}</p>}
+          {done && (
+            <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">
+              נוצרו {done.ok} הזמנות{done.failed ? ` · ${done.failed} נכשלו` : ""}.
+            </p>
+          )}
+          {parsed && (
+            <div className="space-y-2">
+              {parsed.missingColumns.length > 0 && (
+                <p className="rounded-lg bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">חסרות עמודות חובה: {parsed.missingColumns.join(", ")}</p>
+              )}
+              <p className="text-xs font-semibold text-slate-600">
+                {fileName}: {parsed.items.length} שורות · {validItems.length} תקינות · {parsed.items.length - validItems.length} עם שגיאות · סה"כ {formatILS(total)}
+                {parsed.truncated ? ` (נקראו רק ${BULK_MAX_ROWS} הראשונות)` : ""}
+              </p>
+              <div className="max-h-64 overflow-auto rounded-lg border border-slate-100">
+                <table className="w-full min-w-[560px] text-xs">
+                  <thead>
+                    <tr className="bg-slate-50 text-right text-slate-400">
+                      <th className="px-2 py-1.5 font-medium">שורה</th>
+                      <th className="px-2 py-1.5 font-medium">נמען</th>
+                      <th className="px-2 py-1.5 font-medium">עיר ואזור</th>
+                      <th className="px-2 py-1.5 font-medium">מסלול</th>
+                      <th className="px-2 py-1.5 font-medium">מחיר</th>
+                      <th className="px-2 py-1.5 font-medium">סטטוס</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {parsed.items.map((it) => (
+                      <tr key={it.line} className={`border-t border-slate-100 ${it.form ? "" : "bg-rose-50/50"}`}>
+                        <td className="px-2 py-1">{it.line}</td>
+                        <td className="px-2 py-1">{it.recipientName || "—"}</td>
+                        <td className="px-2 py-1">{it.city ? `${it.city}${it.form ? ` · ${zoneLabelFor(it.city)}` : ""}` : "—"}</td>
+                        <td className="px-2 py-1">{DELIVERY_TRACKS[it.track].badge}</td>
+                        <td className="px-2 py-1">{it.form ? formatILS(it.price) : "—"}</td>
+                        <td className={`px-2 py-1 font-medium ${it.form ? "text-emerald-700" : "text-rose-700"}`}>{it.form ? "תקין" : it.errors.join(" · ")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <button
+                type="button"
+                onClick={createAll}
+                disabled={busy || !validItems.length || parsed.missingColumns.length > 0 || (needsOwner && !ownerObj)}
+                className="rounded-lg bg-gradient-to-r from-indigo-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {busy ? "יוצר הזמנות…" : `צור ${validItems.length} הזמנות בלחיצה אחת`}
+              </button>
+              {needsOwner && !ownerObj && <p className="text-[11px] font-semibold text-rose-600">יש לבחור לקוח / עורך דין שאליו ישויכו ההזמנות.</p>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // One-click Excel-friendly CSV (UTF-8 BOM so Hebrew opens cleanly in Excel).
 function exportOrdersCsv(orders, filename = "דוח-מסירות.csv") {
   const head = ["מס' הזמנה", "תאריך", "מסלול", "לקוח / רשות", "אסמכתא / מס' תיק", "נמען", "כתובת", "עיר", "סטטוס", "מספר ביקורים", "שליח", "מחיר"];
@@ -2014,7 +2593,7 @@ function exportOrdersCsv(orders, filename = "דוח-מסירות.csv") {
     formatOrderNum(o.id),
     o.createdDate || "",
     DELIVERY_TRACKS[trackOf(o)].badge.replace(/^\S+\s/, ""),
-    trackOf(o) === "municipal" && o.court ? `${o.court} (${o.submittedBy || ""})` : o.submittedBy || "",
+    (trackOf(o) === "municipal" || trackOf(o) === "bank") && o.court ? `${o.court} (${o.submittedBy || ""})` : o.submittedBy || "",
     o.caseNumber || "",
     o.recipientName || "",
     `${o.street || ""} ${o.houseNumber || ""}`.trim(),
@@ -2529,6 +3108,7 @@ const EMPTY_ORDER_FORM = {
   // Delivery track (legal | municipal | standard)
   deliveryTrack: "legal",
   maxVisits: 1,
+  bankConfidential: true,
   packageDescription: "",
   // Pricing options
   speed: "standard",
@@ -2550,10 +3130,10 @@ function NewOrderForm({ onCreate }) {
       ...f,
       deliveryTrack: t,
       maxVisits: t === "legal" ? 3 : 1,
-      docType: t === "municipal" ? MUNICIPAL_DOC_TYPES[0] : t === "standard" ? "משלוח עסקי" : DOC_TYPES[0],
+      docType: t === "municipal" ? MUNICIPAL_DOC_TYPES[0] : t === "bank" ? BANK_DOC_TYPES[0] : t === "standard" ? "משלוח עסקי" : DOC_TYPES[0],
       customDocType: "",
     }));
-  const docTypeList = track === "municipal" ? MUNICIPAL_DOC_TYPES : DOC_TYPES;
+  const docTypeList = track === "municipal" ? MUNICIPAL_DOC_TYPES : track === "bank" ? BANK_DOC_TYPES : DOC_TYPES;
 
   const handleFile = (e) => {
     const f = e.target.files?.[0];
@@ -2568,7 +3148,7 @@ function NewOrderForm({ onCreate }) {
 
   const submit = (e) => {
     e.preventDefault();
-    if (!form.recipientName || (track === "legal" && !form.idNumber) || !form.phone || !form.street) return;
+    if (!form.recipientName || ((track === "legal" || track === "bank") && !form.idNumber) || !form.phone || !form.street) return;
     // City must resolve to a known settlement (drives the pricing zone).
     const canonicalCity = normalizeCity(form.city);
     if (!canonicalCity) {
@@ -2590,6 +3170,8 @@ function NewOrderForm({ onCreate }) {
           }
         : track === "municipal"
         ? { plaintiff: "", defendant: "", maxVisits: Number(form.maxVisits) === 3 ? 3 : 1 }
+        : track === "bank"
+        ? { plaintiff: "", defendant: "", maxVisits: Number(form.maxVisits) === 3 ? 3 : 1, bankConfidential: form.bankConfidential !== false }
         : { maxVisits: 3 };
     onCreate({ ...form, ...trackFields, city: canonicalCity, urgent: form.speed !== "standard" });
     setForm(EMPTY_ORDER_FORM);
@@ -2606,7 +3188,7 @@ function NewOrderForm({ onCreate }) {
       />
 
       <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">סוג המסירה</p>
-      <div className="mb-5 grid grid-cols-1 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="סוג המסירה">
+      <div className="mb-5 grid grid-cols-1 gap-2 sm:grid-cols-2" role="radiogroup" aria-label="סוג המסירה">
         {Object.values(DELIVERY_TRACKS).map((t) => (
           <button
             key={t.key}
@@ -2642,6 +3224,41 @@ function NewOrderForm({ onCreate }) {
               </select>
             </Field>
           </div>
+        </>
+      )}
+
+      {track === "bank" && (
+        <>
+          <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">פרטי המוסד הפיננסי</p>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Field label="שם הבנק / המוסד הפיננסי / סניף">
+              <input className={inputCls} placeholder="לדוגמה: בנק לאומי — סניף חדרה" value={form.court} onChange={update("court")} />
+            </Field>
+            <Field label="מספר אסמכתא / מעטפה מאובטחת">
+              <input className={inputCls} placeholder="מספר אסמכתא" value={form.caseNumber} onChange={update("caseNumber")} />
+            </Field>
+            <Field label="מספר ביקורים נדרש">
+              <select className={inputCls} value={form.maxVisits} onChange={(e) => setForm((f) => ({ ...f, maxVisits: Number(e.target.value) }))}>
+                <option value={1}>ביקור אחד</option>
+                <option value={3}>עד 3 ביקורים</option>
+              </select>
+            </Field>
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900">
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={form.bankConfidential !== false}
+                onChange={(e) => setForm((f) => ({ ...f, bankConfidential: e.target.checked }))}
+              />
+              <span>
+                <strong>חיסיון בנקאי</strong> (הסתר פרטי תיק/מסמך מהשליח)
+                <span className="block text-xs text-sky-700">השליח יראה "{BANK_MASK_TEXT}" במקום סוג המסמך ומספר האסמכתא.</span>
+              </span>
+            </label>
+          </div>
+          <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 ring-1 ring-inset ring-amber-200">
+            מסירה לנמען בלבד: השליח יידרש לזהות את הנמען בתעודה מזהה (סוג תעודה + 4 ספרות אחרונות). אין מסירה לבן משפחה, אין הנחה בכתובת ואין הדבקה על הדלת.
+          </p>
         </>
       )}
 
@@ -2718,13 +3335,13 @@ function NewOrderForm({ onCreate }) {
             />
           </div>
         </Field>
-        <Field label={track === "legal" ? "מספר תעודת זהות" : "ת.ז. / ח.פ. (לא חובה)"} required={track === "legal"}>
+        <Field label={track === "legal" || track === "bank" ? "מספר תעודת זהות" : "ת.ז. / ח.פ. (לא חובה)"} required={track === "legal" || track === "bank"}>
           <input
             className={inputCls}
-            placeholder={track === "legal" ? "9 ספרות" : "אופציונלי"}
+            placeholder={track === "legal" || track === "bank" ? "9 ספרות" : "אופציונלי"}
             value={form.idNumber}
             onChange={update("idNumber")}
-            required={track === "legal"}
+            required={track === "legal" || track === "bank"}
           />
         </Field>
         <Field label="טלפון" required>
@@ -3018,6 +3635,9 @@ function AttemptEvidence({ attempt: a, courier }) {
           {a.receiverName ? ` — ${a.receiverName}${a.receiverRelation ? ` (${a.receiverRelation})` : ""}` : ""}
         </p>
       )}
+      {a.verifiedIdType && (
+        <p className="mt-1 text-xs font-medium text-sky-800">🏦 אימות זהות — {idVerificationText(a)}</p>
+      )}
       {a.residenceVerification && (
         <p className="mt-1 text-xs font-medium text-slate-600">
           אימות מגורים: {a.residenceVerification}
@@ -3077,6 +3697,42 @@ function ServiceChips({ order }) {
   );
 }
 
+// "שרשרת משמורת": the four-step custody timeline shown in the audit file.
+function CustodyTimeline({ order }) {
+  const steps = buildCustodyChain(order);
+  return (
+    <div className="rounded-lg border border-indigo-100 bg-indigo-50/40 p-3">
+      <p className="mb-2 text-sm font-semibold text-slate-700">שרשרת משמורת (Chain of Custody)</p>
+      <ol className="space-y-1.5 text-xs text-slate-600">
+        {steps.map((st) => (
+          <li key={st.n}>
+            <span className="font-semibold text-slate-700">
+              {st.n}. {st.label}:
+            </span>{" "}
+            {st.pending && !st.at ? (
+              <span className="text-slate-400">{st.detail || "טרם התבצע"}</span>
+            ) : (
+              <span>
+                {st.at}
+                {st.detail ? ` — ${st.detail}` : ""}
+              </span>
+            )}
+            {st.items && st.items.length > 0 && (
+              <ul className="mr-4 mt-0.5 list-disc space-y-0.5">
+                {st.items.map((it, i) => (
+                  <li key={i}>
+                    {it.text} · {it.at} · GPS: <span dir="ltr">{it.gps}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function OrderDetailsModal({ order, onClose, onOpenAffidavit, onCancel, showPrice = true }) {
   if (!order) return null;
   return (
@@ -3099,7 +3755,15 @@ function OrderDetailsModal({ order, onClose, onOpenAffidavit, onCancel, showPric
         {order.status === STATUS.CANCELED && (
           <p className="rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-500">ההזמנה בוטלה{order.cancelledAt ? ` ב-${order.cancelledAt}` : ""} ולא תשוגר לשליח.</p>
         )}
-        {(order.caseNumber || order.court || order.plaintiff) && (
+        {trackOf(order) === "bank" && (
+          <div className="grid grid-cols-1 gap-3 rounded-lg bg-sky-50 p-3 sm:grid-cols-2">
+            <InfoRow label="מספר אסמכתא / מעטפה מאובטחת" value={order.caseNumber || "—"} />
+            <InfoRow label="בנק / מוסד פיננסי / סניף" value={order.court || "—"} />
+            <InfoRow label="חיסיון בנקאי" value={isBankConfidential(order) ? "מופעל — פרטי המסמך מוסתרים מהשליח" : "כבוי"} />
+            <InfoRow label="מסלול" value={DELIVERY_TRACKS.bank.badge} />
+          </div>
+        )}
+        {trackOf(order) !== "bank" && (order.caseNumber || order.court || order.plaintiff) && (
           <div className="grid grid-cols-1 gap-3 rounded-lg bg-slate-50 p-3 sm:grid-cols-2">
             <InfoRow label="מספר תיק" value={order.caseNumber || "—"} />
             <InfoRow label="בית משפט" value={order.court || "—"} />
@@ -3146,6 +3810,7 @@ function OrderDetailsModal({ order, onClose, onOpenAffidavit, onCancel, showPric
             </ul>
           )}
         </div>
+        {needsCustody(order) && <CustodyTimeline order={order} />}
         <div className="rounded-lg border border-slate-200/60 p-3">
           <p className="mb-2 text-sm font-semibold text-slate-700">{usesAffidavit(order) ? "חתימת שליח ותצהיר מוסר" : "חתימת שליח ואישור מסירה"}</p>
           {isAffidavitSigned(order) ? (
@@ -3538,7 +4203,7 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onDeleteOrder, onLawyer
   };
 
   const handleCreateForLawyer = (form) => {
-    onCreate({ ...form, submittedBy: currentLawyer });
+    return onCreate({ ...form, submittedBy: currentLawyer });
   };
 
   const navItems = [
@@ -3662,7 +4327,12 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onDeleteOrder, onLawyer
           <p className="text-center text-xs text-slate-400">ועוד {unreadNotifications.length - 3} הודעות חדשות — בפעמון</p>
         )}
 
-        {tab === "new" && <NewOrderForm onCreate={handleCreateForLawyer} />}
+        {tab === "new" && (
+          <div className="space-y-4">
+            <BulkImportPanel onCreate={handleCreateForLawyer} />
+            <NewOrderForm onCreate={handleCreateForLawyer} />
+          </div>
+        )}
 
         {tab === "status" && (
           <div className="rounded-3xl border border-slate-200/60 bg-white p-5 shadow-sm sm:p-6">
@@ -3731,6 +4401,15 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onDeleteOrder, onLawyer
                           >
                             פרטים
                           </button>
+                          {!isOrderCancelled(o) && (
+                            <button
+                              onClick={() => printWaybillLabel(o)}
+                              title="הדפסת מדבקת ברקוד למעטפה"
+                              className="rounded-md border border-slate-200/60 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100"
+                            >
+                              🏷️ מדבקת ברקוד
+                            </button>
+                          )}
                           {canCancelOrder(o) && onCancelOrder && (
                             <button
                               onClick={() => setCancelId(o.id)}
@@ -4339,6 +5018,9 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
   // Regulation 161(4)(b)(2): how residence was verified before door posting.
   const [residenceVerification, setResidenceVerification] = useState("");
   const [verificationNote, setVerificationNote] = useState("");
+  // Bank track: mandatory ID verification (document type + last 4 digits).
+  const [verifiedIdType, setVerifiedIdType] = useState("");
+  const [verifiedIdLast4, setVerifiedIdLast4] = useState("");
   const gpsRef = useRef(null);
   const [recipientSig, setRecipientSig] = useState(null);
   const [audioOk, setAudioOk] = useState(false);
@@ -4403,8 +5085,12 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
     return { orderId: order && order.id, lat: g && g.lat != null ? g.lat : null, lng: g && g.lng != null ? g.lng : null, at: new window.Date() };
   };
   const singleVisit = isSingleVisit(order);
-  // Legal / 3-visit deliveries must record WHO received the document.
-  const needsReceiver = actionType === "delivered" && !singleVisit;
+  // Bank track: personal delivery only + ID verification; no posting / leaving.
+  const isBank = trackOf(order) === "bank";
+  // Legal / 3-visit deliveries (and every bank delivery) must record WHO received the document.
+  const needsReceiver = actionType === "delivered" && (!singleVisit || isBank);
+  const receiverLabels = isBank ? DELIVERED_TO_BANK : DELIVERED_TO;
+  const idOk = !isBank || actionType !== "delivered" || (ID_DOC_TYPES.includes(verifiedIdType) && /^\d{4}$/.test(verifiedIdLast4));
   const receiverOk = !needsReceiver || deliveredToType === "self" || (receiverName.trim() !== "" && receiverRelation.trim() !== "");
   const noSigNeeded = actionType === "delivered" && singleVisit && deliveryMode === "left";
   const titles = {
@@ -4428,7 +5114,7 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
     !gpsReady
       ? false
       : actionType === "delivered"
-      ? (signed || noSigNeeded) && !!audioOk && receiverOk
+      ? (signed || noSigNeeded) && !!audioOk && receiverOk && idOk
       : actionType === "refused"
       ? !!audioOk && !!description.trim()
       : actionType === "posted"
@@ -4437,6 +5123,9 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
 
   const complete = async () => {
     if (submitting) return;
+    // Bank deliveries: never post on the door, never without ID verification.
+    if (isBank && actionType === "posted") return;
+    if (actionType === "delivered" && !idOk) return;
     // A photo is mandatory for EVERY visit action (no answer, posting,
     // delivery, refusal) — nothing is saved without one.
     if (!photo) {
@@ -4493,16 +5182,19 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
           : singleVisit && deliveryMode === "left"
           ? "הונח בכתובת / בתיבה (ללא חתימה) — מתועד בתמונה, GPS וזמן"
           : needsReceiver && deliveredToType !== "self"
-          ? `נמסר ל${DELIVERED_TO[deliveredToType]}: ${receiverName.trim()} (${receiverRelation.trim()}) וחתום`
+          ? `נמסר ל${receiverLabels[deliveredToType]}: ${receiverName.trim()} (${receiverRelation.trim()}) וחתום${isBank ? ` — ${idVerificationText({ verifiedIdType, verifiedIdLast4 })}` : ""}`
+          : isBank
+          ? `נמסר לנמען בעצמו וחתום — ${idVerificationText({ verifiedIdType, verifiedIdLast4 })}`
           : "נמסר וחתום על ידי הנמען",
       ...(actionType === "delivered" && singleVisit ? { deliveryMode } : {}),
       ...(needsReceiver
         ? {
-            deliveredToType: DELIVERED_TO[deliveredToType],
+            deliveredToType: receiverLabels[deliveredToType],
             receiverName: deliveredToType === "self" ? "" : receiverName.trim(),
             receiverRelation: deliveredToType === "self" ? "" : receiverRelation.trim(),
           }
         : {}),
+      ...(isBank && actionType === "delivered" ? { verifiedIdType, verifiedIdLast4 } : {}),
       ...(actionType === "posted"
         ? { residenceVerification: RESIDENCE_VERIFY[residenceVerification], verificationNote: verificationNote.trim() }
         : {}),
@@ -4592,6 +5284,7 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
             { ok: !!photo, label: "תמונה / וידאו" },
             { ok: !!audioOk, label: "הקלטת שמע" },
             ...(actionType === "delivered" && !noSigNeeded ? [{ ok: signed, label: "חתימת הנמען" }] : []),
+            ...(actionType === "delivered" && isBank ? [{ ok: idOk, label: "זיהוי בתעודה מזהה" }] : []),
           ].map((it) => (
             <li key={it.label} className={`flex items-center gap-1.5 font-medium ${it.ok ? "text-emerald-600" : "text-slate-400"}`}>
               {it.ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clock className="h-3.5 w-3.5" />} {it.label}
@@ -4618,9 +5311,9 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
         <div className="space-y-4">
           {needsReceiver && (
             <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
-              <p className="text-xs font-bold text-slate-600">למי נמסר המסמך? (תקנה 163(ב))</p>
+              <p className="text-xs font-bold text-slate-600">{isBank ? "למי נמסר המסמך? (מסירה בנקאית — לנמען בלבד)" : "למי נמסר המסמך? (תקנה 163(ב))"}</p>
               <div className="space-y-1.5" role="radiogroup" aria-label="מקבל המסמך">
-                {Object.entries(DELIVERED_TO).map(([k, l]) => (
+                {Object.entries(receiverLabels).map(([k, l]) => (
                   <label key={k} className="flex cursor-pointer items-start gap-2 text-sm text-slate-700">
                     <input type="radio" name="deliveredTo" className="mt-1" checked={deliveredToType === k} onChange={() => setDeliveredToType(k)} />
                     <span>{l}</span>
@@ -4646,7 +5339,32 @@ function CourierActionModal({ order, actionType, onClose, onComplete }) {
               {!receiverOk && <p className="text-[11px] font-semibold text-rose-600">יש למלא שם המקבל וקרבה / תפקיד.</p>}
             </div>
           )}
-          {singleVisit && (
+          {isBank && (
+            <div className="space-y-2 rounded-lg border border-sky-200 bg-sky-50 p-3">
+              <p className="text-xs font-bold text-sky-900">🏦 אימות זהות — חובה לפני אישור המסירה</p>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <select className={inputCls} value={verifiedIdType} onChange={(e) => setVerifiedIdType(e.target.value)} aria-label="סוג תעודה מזהה">
+                  <option value="">סוג תעודה מזהה…</option>
+                  {ID_DOC_TYPES.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  className={inputCls}
+                  inputMode="numeric"
+                  maxLength={4}
+                  placeholder="4 ספרות אחרונות של מספר התעודה"
+                  value={verifiedIdLast4}
+                  onChange={(e) => setVerifiedIdLast4(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                />
+              </div>
+              {!idOk && <p className="text-[11px] font-semibold text-rose-600">יש לבחור סוג תעודה ולהזין בדיוק 4 ספרות.</p>}
+              <p className="text-[11px] text-sky-800">מסירה בנקאית: לנמען בלבד (או מורשה חתימה מזוהה). אסור להניח בכתובת, למסור לבן משפחה או להדביק על הדלת.</p>
+            </div>
+          )}
+          {singleVisit && !isBank && (
             <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="אופן המסירה">
               {[
                 ["recipient", "נמסר לנמען"],
@@ -4879,7 +5597,7 @@ function buildWazeUrl(cleanAddress) {
   return `https://waze.com/ul?q=${encodeURIComponent(cleanAddress)}&navigate=yes`;
 }
 
-function CourierTaskCard({ order, onAction, onRequestPrice }) {
+function CourierTaskCard({ order, onAction, onRequestPrice, onPickup }) {
   // Display address includes the apartment number for clarity on the card...
   const address = `${order.street} ${order.houseNumber}${order.apartment ? "/" + order.apartment : ""}, ${order.city}`;
   // ...but Waze/navigation only ever gets Street + House Number + City.
@@ -4998,7 +5716,9 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
   // 3rd visit must end in a posting or a successful delivery — this is what
   // stops repeated taps from inflating the visit count (and the payout)
   // past what the legal process allows.
-  const noAnswerLocked = !singleVisit && attemptsCount >= 2;
+  // Bank deliveries cannot be posted on the door, so a 3rd no-answer stays a plain visit.
+  const bankTrack = trackOf(order) === "bank";
+  const noAnswerLocked = !singleVisit && attemptsCount >= 2 && !bankTrack;
   const canPost = attemptsCount >= 2;
 
   // Phone lookup is tolerant of whichever field name the order came in
@@ -5025,7 +5745,7 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
             {order.recipientName}
             {speedOf(order) !== "standard" && <Zap className="h-4 w-4 text-amber-500" />}
           </p>
-          <p className="text-xs text-slate-400">{formatOrderNum(order.id)} · {order.docType}</p>
+          <p className="text-xs text-slate-400">{formatOrderNum(order.id)} · {courierDocLabel(order)}</p>
         </div>
         <StatusBadge status={order.status} />
       </div>
@@ -5053,6 +5773,25 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
           🖨️ המסמך הודפס על ידי המשרד — יש לוודא שהעותק שבידך תואם ל-{order.fileName || "הקובץ שהועלה"}.
         </p>
       )}
+      {bankTrack && (
+        <p className="mt-2 rounded-lg bg-sky-50 px-2.5 py-1.5 text-xs font-semibold text-sky-800 ring-1 ring-inset ring-sky-200">
+          🏦 מסירה בנקאית — לנמען בלבד (או מורשה חתימה מזוהה). חובה זיהוי בתעודה מזהה. אסור להדביק על הדלת או להניח בכתובת.
+        </p>
+      )}
+      {needsCustody(order) &&
+        (order.pickedUpAt ? (
+          <p className="mt-2 text-[11px] font-medium text-emerald-700">📦 נקלט לחלוקה ב-{order.pickedUpAt}</p>
+        ) : (
+          onPickup && (
+            <button
+              type="button"
+              onClick={() => onPickup(order)}
+              className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+            >
+              📦 סמן נאסף מהלקוח / נקלט לחלוקה
+            </button>
+          )
+        ))}
       {/* {LEGAL_REFS.serviceRule}: up to three attempts, each on a different day. */}
       {!singleVisit && (
       <div className="mt-3 rounded-xl bg-slate-50 p-2.5">
@@ -5176,12 +5915,12 @@ function CourierTaskCard({ order, onAction, onRequestPrice }) {
             onClick={() => onAction(order, "noanswer")}
             disabled={lockedToday}
             title={lockedToday ? "בוצע ביקור היום — ניתן לבצע ביקור נוסף רק מחר" : undefined}
-            className={`flex items-center justify-center gap-1.5 rounded-lg border border-slate-200/60 px-2 py-2.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300 ${singleVisit ? "col-span-2" : ""}`}
+            className={`flex items-center justify-center gap-1.5 rounded-lg border border-slate-200/60 px-2 py-2.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300 ${singleVisit || bankTrack ? "col-span-2" : ""}`}
           >
             <Timer className="h-3.5 w-3.5" /> {singleVisit ? "אין מענה" : `אין מענה — ביקור ${attemptsCount + 1}`}
           </button>
         )}
-        {!singleVisit && (
+        {!singleVisit && !bankTrack && (
         <button
           onClick={() => onAction(order, "posted")}
           disabled={lockedToday || !canPost}
@@ -5312,7 +6051,7 @@ function OpenOrdersTab({ openOrders, takenMessages, myResponses, courierId, onRe
             <div className="flex items-start justify-between gap-2">
               <div>
                 <p className="text-sm font-bold text-slate-800">{o.city}</p>
-                <p className="text-xs text-slate-500">{o.docType === "אחר" && o.customDocType ? o.customDocType : o.docType}</p>
+                <p className="text-xs text-slate-500">{courierDocLabel(o)}</p>
               </div>
               <div className="flex flex-col items-end gap-1">
                 <span className="text-[11px] font-medium text-slate-400">{formatOrderNum(o.id)}</span>
@@ -5412,7 +6151,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
     if (typeof window.Notification !== "undefined" && window.Notification.permission === "granted") {
       const first = pickupOrders.find((o) => o.id === fresh[0]);
       new window.Notification("משלוחים משפטיים — הזמנה חדשה באזור שלך", {
-        body: `${first ? first.city : ""} · ${fresh.length > 1 ? fresh.length + " הזמנות חדשות" : first ? first.docType : ""}`,
+        body: `${first ? first.city : ""} · ${fresh.length > 1 ? fresh.length + " הזמנות חדשות" : first ? courierDocLabel(first) : ""}`,
       });
     }
   }, [pickupKey, ready, currentCourier]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -5457,6 +6196,8 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
   const handleComplete = (attempt) => {
     // Only the assigned courier can write to an order.
     if (!activeOrder || activeOrder.assignedCourier !== currentCourier) return;
+    // Bank deliveries can never end in a door posting.
+    if (trackOf(activeOrder) === "bank" && attempt.type === STATUS.POSTED) return;
     onUpdateOrder(activeOrder.id, (o) => {
       const newAttempts = [...o.attempts, attempt];
       let newStatus = o.status;
@@ -5669,6 +6410,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
                   order={o}
                   onAction={handleAction}
                   onRequestPrice={setPriceRequestOrder}
+                  onPickup={(ord) => onUpdateOrder(ord.id, (x) => markPickedUp(x, currentCourier, "courier"))}
                 />
               ))}
               {activeOrders.length === 0 && (
@@ -5702,7 +6444,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
                       <div>
                         <p className="font-semibold text-slate-800">{o.recipientName}</p>
                         <p className="text-xs text-slate-400">
-                          {formatOrderNum(o.id)} · {o.docType}
+                          {formatOrderNum(o.id)} · {courierDocLabel(o)}
                         </p>
                       </div>
                       <div className="flex flex-col items-end gap-1">
@@ -5976,7 +6718,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
         onComplete={handleComplete}
       />
       <AffidavitModal
-        order={myOrders.find((o) => o.id === affidavitId) || null}
+        order={maskOrderForCourier(myOrders.find((o) => o.id === affidavitId) || null)}
         onClose={() => setAffidavitId(null)}
         onSign={handleSignAffidavit}
       />
@@ -6087,7 +6829,7 @@ function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
   const signed = isAffidavitSigned(order);
   const canEdit = !!onSign;
   const asAffidavit = usesAffidavit(order) && docKind === "affidavit";
-  const canToggle = trackOf(order) === "municipal" && usesAffidavit(order);
+  const canToggle = (trackOf(order) === "municipal" || trackOf(order) === "bank") && usesAffidavit(order);
   const docWord = asAffidavit ? "תצהיר" : "אישור מסירה";
   // Only the owning lawyer's portal passes onLawyerVerify; the courier and the
   // admin screens never do, so they can neither see nor use the panel.
@@ -7528,6 +8270,8 @@ function AdminDashboard({
   onTestNotify,
   onSignAffidavit,
   onDeleteOrder,
+  onMarkPickedUp,
+  onCreateOrder,
 }) {
   const [dashTab, setDashTab] = useState(() => (window.location.hash === "#couriers" ? "couriers" : "overview"));
   const [activeFilter, setActiveFilter] = useState(null);
@@ -7744,6 +8488,13 @@ function AdminDashboard({
         ))}
       </div>
 
+      {onCreateOrder && (
+        <BulkImportPanel
+          onCreate={onCreateOrder}
+          owners={lawyers && lawyers.length ? lawyers : LAWYERS.map((n) => ({ id: null, name: n }))}
+        />
+      )}
+
       <div className="flex flex-wrap items-center justify-end gap-2">
         {activeFilter === "canceled" && onDeleteOrder && filteredOrders.length > 0 && (
           <button
@@ -7935,13 +8686,31 @@ function AdminDashboard({
                           })()}
                         </td>
                         <td className="px-3 py-2.5">
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
                           <button
                             onClick={() => setDetailsId(o.id)}
                             className="rounded-md border border-slate-200/60 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100"
                           >
                             פרטים
                           </button>
+                          {!isOrderCancelled(o) && (
+                            <button
+                              onClick={() => printWaybillLabel(o)}
+                              title="הדפסת מדבקת ברקוד למעטפה"
+                              className="rounded-md border border-slate-200/60 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100"
+                            >
+                              🏷️ מדבקת ברקוד
+                            </button>
+                          )}
+                          {onMarkPickedUp && needsCustody(o) && !o.pickedUpAt && !isOrderCompleted(o) && !isOrderCancelled(o) && (
+                            <button
+                              onClick={() => onMarkPickedUp(o.id)}
+                              className="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+                            >
+                              📦 סמן נאסף מהלקוח / נקלט לחלוקה
+                            </button>
+                          )}
+                          {needsCustody(o) && o.pickedUpAt && <span className="text-[10px] font-medium text-emerald-700">📦 נקלט {o.pickedUpAt}</span>}
                           {isTerminalOrder(o) ? (
                             <button
                               onClick={() => setAffidavitOrder(o)}
@@ -8417,6 +9186,8 @@ async function visitMirror(order, a, i) {
     receiverRelation: a.receiverRelation || "",
     residenceVerification: a.residenceVerification || null,
     verificationNote: a.verificationNote || "",
+    verifiedIdType: a.verifiedIdType || null,
+    verifiedIdLast4: a.verifiedIdLast4 || "",
     photo: photoUrl
       ? { dataUrl: photoUrl, kind: (a.photo && a.photo.kind) || "image", timestamp: a.photo && a.photo.timestamp, gps: (a.photo && a.photo.gps) ?? null }
       : null,
@@ -8484,6 +9255,8 @@ async function visitToRow(order, a, seq, courierId) {
       receiverRelation: a.receiverRelation || "",
       residenceVerification: a.residenceVerification || null,
       verificationNote: a.verificationNote || "",
+      verifiedIdType: a.verifiedIdType || null,
+      verifiedIdLast4: a.verifiedIdLast4 || "",
     },
     photo_url: photoUrl,
     photo_meta: a.photo ? { kind: a.photo.kind || "image", timestamp: a.photo.timestamp, gps: a.photo.gps ?? null } : null,
@@ -8632,6 +9405,8 @@ async function cloudFetchLawyers() {
     email: p.email || "",
     phone: p.phone || "",
     firm: p.firm || "",
+    licenseNo: p.bar_license_no || "",
+    address: p.office_address || "",
     blocked: !!p.blocked,
   }));
 }
@@ -10522,7 +11297,8 @@ function AppShell({ profile, onSignOut }) {
         defendant: form.defendant || "",
         recipientRole: form.recipientRole || RECIPIENT_ROLES[0],
         deliveryTrack: form.deliveryTrack || "legal",
-        maxVisits: form.deliveryTrack === "municipal" ? (Number(form.maxVisits) === 3 ? 3 : 1) : form.deliveryTrack === "standard" ? 1 : 3,
+        maxVisits: form.deliveryTrack === "municipal" || form.deliveryTrack === "bank" ? (Number(form.maxVisits) === 3 ? 3 : 1) : form.deliveryTrack === "standard" ? 1 : 3,
+        bankConfidential: form.deliveryTrack === "bank" ? form.bankConfidential !== false : false,
         packageDescription: form.packageDescription || "",
         status: STATUS.PENDING,
         assignedCourier: "",
@@ -10533,19 +11309,30 @@ function AppShell({ profile, onSignOut }) {
         priceRequests: [],
         // Which signed-in lawyer submitted this order — the Lawyer Portal
         // uses this to show each lawyer only their own submissions.
-        submittedBy: cloudOn ? profile.full_name : form.submittedBy || LAWYERS[0],
+        submittedBy: form.ownerLawyer && cloudOn && profile.role === "admin" ? form.ownerLawyer.name : cloudOn ? profile.full_name : form.submittedBy || LAWYERS[0],
         // Cloud: row ownership (used by Row Level Security) + the attorney's
         // details, frozen onto the order for the affidavit's verification block.
         ...(cloudOn
-          ? {
-              lawyerId: profile.id,
-              lawyerInfo: {
-                licenseNo: profile.bar_license_no || "________",
-                firm: profile.firm || "",
-                address: profile.office_address || "",
-                phone: profile.phone || "",
-              },
-            }
+          ? form.ownerLawyer && profile.role === "admin" && form.ownerLawyer.id
+            ? {
+                // Admin bulk import on behalf of a client: the order belongs to that client.
+                lawyerId: form.ownerLawyer.id,
+                lawyerInfo: {
+                  licenseNo: form.ownerLawyer.licenseNo || "________",
+                  firm: form.ownerLawyer.firm || "",
+                  address: form.ownerLawyer.address || "",
+                  phone: form.ownerLawyer.phone || "",
+                },
+              }
+            : {
+                lawyerId: profile.id,
+                lawyerInfo: {
+                  licenseNo: profile.bar_license_no || "________",
+                  firm: profile.firm || "",
+                  address: profile.office_address || "",
+                  phone: profile.phone || "",
+                },
+              }
           : {}),
       }
     );
@@ -10607,6 +11394,12 @@ function AppShell({ profile, onSignOut }) {
   const handleUpdateOrder = useCallback((id, updater) => {
     setOrders((prev) => prev.map((o) => (o.id === id ? updater(o) : o)));
   }, []);
+
+  // Chain of custody: the admin marks an envelope as collected from the client.
+  const handleMarkPickedUp = useCallback((id) => {
+    const by = cloudOn && profile ? profile.full_name : "מנהל המערכת";
+    setOrders((prev) => prev.map((o) => (o.id === id ? markPickedUp(o, by, "admin") : o)));
+  }, [cloudOn, profile, setOrders]);
 
   // Admin "הפקת תצהיר וחתימה": the signature is captured on the Admin's
   // screen on behalf of the assigned courier, and the record says so
@@ -10727,6 +11520,7 @@ function AppShell({ profile, onSignOut }) {
                 assignedCourier: courier,
                 courierId: c ? c.id : null,
                 courierInfo: c ? { name: c.name, licenseNumber: c.licenseNumber, phone: c.phone } : null,
+                assignedAt: courier ? o.assignedAt || nowStamp(0) : o.assignedAt,
                 status: courier && o.status === STATUS.PENDING ? STATUS.IN_PROGRESS : o.status,
               }
             : o
@@ -10917,6 +11711,8 @@ function AppShell({ profile, onSignOut }) {
           onTestNotify={alerts.sendTest}
           onSignAffidavit={handleAdminSignAffidavit}
           onDeleteOrder={handleDeleteOrderPermanently}
+          onMarkPickedUp={handleMarkPickedUp}
+          onCreateOrder={handleCreate}
         />
       )}
     </div>
