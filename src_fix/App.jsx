@@ -819,6 +819,11 @@ function speedOf(order) {
   return order.speed || (order.urgent ? "urgent" : "standard");
 }
 
+// "חבר מביא חבר": ₪50 credit on a later order. The order total never drops
+// below REFERRAL_MIN_ORDER because of the credit (courier payout is ₪60).
+const REFERRAL_CREDIT = 50;
+const REFERRAL_MIN_ORDER = 110;
+
 // Client-facing price breakdown for one order.
 function calcClientPrice(order) {
   const zone = zoneForCity(order.city);
@@ -832,6 +837,10 @@ function calcClientPrice(order) {
     ...(tracingFee ? [{ key: "tracing", label: ADDON_OPTIONS[0].label, amount: tracingFee }] : []),
     ...(printingFee ? [{ key: "printing", label: ADDON_OPTIONS[1].label, amount: printingFee }] : []),
   ];
+  // Applied referral credit (set only by the admin): fixed ₪50, floored at the minimum price.
+  const subtotal = lines.reduce((sum, l) => sum + l.amount, 0);
+  const referralCredit = order.referralCredit ? Math.max(0, Math.min(REFERRAL_CREDIT, subtotal - REFERRAL_MIN_ORDER)) : 0;
+  if (referralCredit) lines.push({ key: "referralCredit", label: "זיכוי חבר מביא חבר", amount: -referralCredit });
   return {
     zone,
     speed,
@@ -839,6 +848,7 @@ function calcClientPrice(order) {
     speedFee: speed.fee,
     tracingFee,
     printingFee,
+    referralCredit,
     lines,
     total: lines.reduce((sum, l) => sum + l.amount, 0),
   };
@@ -3016,46 +3026,213 @@ function BottomNav({ items, active, onChange }) {
 }
 
 // ---------------------------------------------------------------------------
-// "חבר מביא חבר" — referral link, barcode, welcome modal.
-// No SQL: the code is derived from the profile id; the invited user's code
-// travels in auth user_metadata.referred_by and is stamped on that client's
-// orders as order.referral (inside the existing orders.data JSONB).
-// Rewards are tracked and granted by the admin (order.referral.rewards); they
-// are NOT applied to prices automatically.
+// "חבר מביא חבר" — signed referral code, barcode, welcome modal, anti-fraud.
+// No SQL. Where things live:
+//   • the invited user's code: auth user_metadata.referred_by (set at sign-up only)
+//     and order.referral = { code, deviceMatch } on that client's orders;
+//   • the admin-only reward ledger: settings row "referrals" (admin read/write);
+//   • an applied credit: order.referralCredit (see calcClientPrice, ₪110 floor).
+// The checksum only catches typos / garbled codes — it is computed with a public
+// algorithm, so it is NOT cryptographic proof. Real protection = the referrer
+// must exist, the identity checks below, completion gate and the admin lock.
 // ---------------------------------------------------------------------------
 const REFERRAL_BASE = "https://mesirot.express";
-const REFERRAL_CREDIT = 50;
-const REFERRAL_RE = /^MX-[0-9A-Z]{8}$/;
+const REFERRAL_RE = /^REF-[0-9A-F]{8}-[0-9A-Z]{4}$/;
+const REFERRAL_SALT = "mesirot-ref-v1";
 const REFERRAL_STORE_KEY = "mx_ref";
-const WELCOME_WINDOW_DAYS = 7;
-function referralCodeFor(profileId) {
-  const hex = String(profileId == null ? "" : profileId).replace(/[^0-9a-zA-Z]/g, "").slice(0, 8).toUpperCase();
-  return hex.length === 8 ? `MX-${hex}` : "";
+const DEVICE_OWNERS_KEY = "mx_dev_owners";
+function normalizeReferralId(v) {
+  const hex = String(v == null ? "" : v).replace(/[^0-9a-fA-F]/g, "").slice(0, 8).toUpperCase();
+  return hex.length === 8 ? hex : "";
+}
+// FNV-1a over salt+id → 4 base-36 characters.
+function referralHash(id8) {
+  let h = 0x811c9dc5;
+  const t = REFERRAL_SALT + id8;
+  for (let i = 0; i < t.length; i += 1) {
+    h ^= t.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return (h % 1679616).toString(36).toUpperCase().padStart(4, "0");
+}
+// generateReferralCode(user) → "REF-<ID>-<HASH>" ("" when the user has no usable id).
+function generateReferralCode(user) {
+  const id = normalizeReferralId(user && typeof user === "object" ? user.id : user);
+  return id ? `REF-${id}-${referralHash(id)}` : "";
+}
+// verifyReferralCode(code) → { ok, code, id } | { ok:false, reason }. Format + checksum only.
+function verifyReferralCode(code) {
+  const c = String(code == null ? "" : code).trim().toUpperCase();
+  if (!REFERRAL_RE.test(c)) return { ok: false, reason: "format" };
+  const id = c.slice(4, 12);
+  if (referralHash(id) !== c.slice(13)) return { ok: false, reason: "checksum" };
+  return { ok: true, code: c, id };
 }
 function referralLinkFor(code) {
-  return REFERRAL_RE.test(code || "") ? `${REFERRAL_BASE}/register?ref=${code}` : "";
+  return verifyReferralCode(code).ok ? `${REFERRAL_BASE}/?ref=${verifyReferralCode(code).code}` : "";
 }
-// Reads ?ref=MX-XXXXXXXX from the URL (validated), remembers it on this device
-// and returns the code to use ("" when none).
+// ?ref=REF-… from the URL (validated) is remembered on this device; returns the code ("" = none).
 function captureReferralFromUrl() {
   let code = "";
   try {
     const q = new window.URLSearchParams(window.location.search).get("ref");
-    if (q && REFERRAL_RE.test(q.trim().toUpperCase())) code = q.trim().toUpperCase();
+    const v = verifyReferralCode(q);
+    if (v.ok) code = v.code;
   } catch (e) {
     /* ignore */
   }
   try {
     if (code) window.localStorage.setItem(REFERRAL_STORE_KEY, code);
     else {
-      const saved = window.localStorage.getItem(REFERRAL_STORE_KEY) || "";
-      if (REFERRAL_RE.test(saved)) code = saved;
+      const v = verifyReferralCode(window.localStorage.getItem(REFERRAL_STORE_KEY));
+      if (v.ok) code = v.code;
     }
   } catch (e) {
     /* storage unavailable */
   }
   return code;
 }
+// Device check (Layer B-5): profile ids that have signed in on this browser.
+function readDeviceOwners() {
+  try {
+    const a = JSON.parse(window.localStorage.getItem(DEVICE_OWNERS_KEY) || "[]");
+    return Array.isArray(a) ? a.filter((x) => /^[0-9A-F]{8}$/.test(x)) : [];
+  } catch (e) {
+    return [];
+  }
+}
+function rememberDeviceOwner(profileId) {
+  const id = normalizeReferralId(profileId);
+  if (!id) return;
+  const a = readDeviceOwners();
+  if (a.includes(id)) return;
+  try {
+    window.localStorage.setItem(DEVICE_OWNERS_KEY, JSON.stringify([...a, id].slice(-20)));
+  } catch (e) {
+    /* ignore */
+  }
+}
+// True when the referrer behind this code has signed in on THIS browser.
+function deviceHasReferrer(code) {
+  const v = verifyReferralCode(code);
+  return v.ok && readDeviceOwners().includes(v.id);
+}
+
+// ---- identity comparison (Layer B) ----
+const PUBLIC_EMAIL_DOMAINS = new window.Set([
+  "gmail.com", "googlemail.com", "yahoo.com", "yahoo.co.il", "hotmail.com", "outlook.com", "live.com", "msn.com",
+  "walla.co.il", "walla.com", "icloud.com", "me.com", "aol.com", "proton.me", "protonmail.com", "gmx.com", "mail.com",
+  "yandex.com", "bezeqint.net", "netvision.net.il", "012.net.il", "013.net", "zahav.net.il", "inter.net.il", "tapuz.co.il",
+]);
+function emailParts(e) {
+  const m = String(e || "").trim().toLowerCase().match(/^([^@\s]+)@([^@\s]+)$/);
+  return m ? { local: m[1], domain: m[2] } : null;
+}
+function normalizeEmail(e) {
+  const p = emailParts(e);
+  if (!p) return "";
+  let local = p.local.split("+")[0];
+  if (p.domain === "gmail.com" || p.domain === "googlemail.com") local = local.replace(/\./g, "");
+  return `${local}@${p.domain === "googlemail.com" ? "gmail.com" : p.domain}`;
+}
+function phoneLast9(v) {
+  const d = String(v || "").replace(/\D/g, "");
+  return d.length >= 7 ? d.slice(-9) : "";
+}
+function normalizeIdentityText(v) {
+  return String(v || "")
+    .toLowerCase()
+    .replace(/["'׳״`.,\-–—()\/\\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^עו ?ד /, "");
+}
+function normalizeLicense(v) {
+  const t = String(v || "").toLowerCase().replace(/[^0-9a-z֐-׿]/g, "");
+  return t.length >= 3 && !/^_+$/.test(t) ? t : "";
+}
+// Why two accounts look like the same person / organisation (array of Hebrew reasons).
+function identityOverlapReasons(a, b) {
+  const out = [];
+  const ea = normalizeEmail(a.email);
+  const eb = normalizeEmail(b.email);
+  const da = emailParts(a.email);
+  const db = emailParts(b.email);
+  if (ea && ea === eb) out.push("אותה כתובת אימייל (לאחר נרמול)");
+  else if (da && db && da.domain === db.domain && !PUBLIC_EMAIL_DOMAINS.has(da.domain)) out.push(`אותו דומיין אימייל ארגוני (${da.domain})`);
+  const pa = phoneLast9(a.phone);
+  if (pa && pa === phoneLast9(b.phone)) out.push("אותו מספר טלפון (9 ספרות אחרונות)");
+  const la = normalizeLicense(a.licenseNo);
+  if (la && la === normalizeLicense(b.licenseNo)) out.push("אותו מספר רישיון עו\"ד / ח.פ.");
+  const names = (x) => [normalizeIdentityText(x.firm), normalizeIdentityText(x.name)].filter(Boolean);
+  const nb = names(b);
+  if (names(a).some((n) => nb.includes(n))) out.push("אותו שם משרד / חברה");
+  return out;
+}
+function orderBelongsTo(o, l) {
+  return o.lawyerId === l.id || (!o.lawyerId && o.submittedBy === l.name);
+}
+// One row per referred client (a client with at least one order carrying a referral stamp).
+// Layer A: checksum + referrer exists and is active. Layer B: identity overlap,
+// duplicate identity among referred accounts, same device. Layer C: completion gate.
+function buildReferralRows({ lawyers, orders, ledger }) {
+  const led = ledger || {};
+  const rows = [];
+  (lawyers || []).forEach((l) => {
+    const stamped = (orders || [])
+      .filter((o) => o.referral && o.referral.code && orderBelongsTo(o, l))
+      .sort((x, y) => String(x.createdDate || "").localeCompare(String(y.createdDate || "")));
+    if (!stamped.length) return;
+    const mine = (orders || []).filter((o) => orderBelongsTo(o, l));
+    const v = verifyReferralCode(stamped[0].referral.code);
+    const referrer = v.ok ? (lawyers || []).find((x) => generateReferralCode(x) === v.code) || null : null;
+    const reasons = [];
+    if (!v.ok) reasons.push("קוד הפניה לא תקין (checksum)");
+    else if (!referrer) reasons.push("הממליץ אינו קיים במערכת");
+    else if (referrer.blocked) reasons.push("הממליץ חסום / אינו פעיל");
+    else if (referrer.id === l.id) reasons.push("הפניה עצמית — הקוד שייך לאותו חשבון");
+    else identityOverlapReasons(referrer, l).forEach((r) => reasons.push(r));
+    if (mine.some((o) => o.referral && o.referral.deviceMatch === true)) reasons.push("אותו מכשיר של הממליץ (אימות מכשיר)");
+    rows.push({
+      referredId: l.id,
+      referred: l,
+      referrer,
+      code: v.ok ? v.code : String(stamped[0].referral.code),
+      joinedAt: l.createdAt || "",
+      firstCompleted: mine.some((o) => isOrderCompleted(o) && !isOrderCancelled(o)),
+      reasons,
+      ledger: led[l.id] || null,
+    });
+  });
+  // Duplicate identity among referred accounts: later accounts are compared to earlier ones.
+  rows.sort((x, y) => String(x.joinedAt).localeCompare(String(y.joinedAt)));
+  rows.forEach((r, i) => {
+    for (let j = 0; j < i; j += 1) {
+      identityOverlapReasons(rows[j].referred, r.referred).forEach((x) => r.reasons.push(`זהה לחשבון אחר שהופנה (${rows[j].referred.name}): ${x}`));
+    }
+  });
+  rows.forEach((r) => {
+    r.fraudFlag = r.reasons.length > 0;
+    r.fraudReason = r.reasons.join(" · ");
+  });
+  return rows;
+}
+// The holder's earliest unassigned order where the full ₪50 fits above the ₪110 floor.
+function eligibleCreditOrder(holder, orders) {
+  return (
+    (orders || [])
+      .filter(
+        (o) =>
+          orderBelongsTo(o, holder) &&
+          o.status === STATUS.PENDING &&
+          !isOrderCancelled(o) &&
+          !o.referralCredit &&
+          calcClientPrice({ ...o, referralCredit: null }).total - REFERRAL_CREDIT >= REFERRAL_MIN_ORDER
+      )
+      .sort((x, y) => String(x.createdDate || "").localeCompare(String(y.createdDate || "")))[0] || null
+  );
+}
+
 function copyText(text) {
   const fallback = () => {
     try {
@@ -3106,18 +3283,14 @@ function useCopyToast() {
   };
   return [toast, copy];
 }
-// Personal invitation link + Code 128 barcode of the referral code.
-function ReferralCard({ code }) {
+// Personal link + copy button + Code 128 barcode of the signed code.
+function ReferralShare({ code }) {
   const [toast, copy] = useCopyToast();
   const link = referralLinkFor(code);
   if (!link) return null;
   return (
-    <div className="rounded-3xl border border-amber-200/70 bg-gradient-to-br from-amber-50 to-white p-5 shadow-sm">
-      <p className="text-sm font-bold text-amber-800">🎁 חבר מביא חבר</p>
-      <p className="mt-1 text-xs leading-relaxed text-slate-600">
-        חבר שיצטרף דרככם ויבצע מסירה ראשונה — מסירה ראשונה חינם. ואתם: זיכוי ₪{REFERRAL_CREDIT}.
-      </p>
-      <p className="mt-3 text-[11px] font-medium text-slate-400">קישור ההזמנה האישי שלכם</p>
+    <div>
+      <p className="text-[11px] font-medium text-slate-400">הקישור האישי שלכם</p>
       <p dir="ltr" className="mt-1 select-all break-all rounded-xl bg-white px-3 py-2 text-left text-xs text-slate-700 ring-1 ring-slate-200">
         {link}
       </p>
@@ -3126,10 +3299,10 @@ function ReferralCard({ code }) {
         onClick={() => copy(link, "הקישור הועתק ✓")}
         className="mt-2 w-full rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-bold text-white hover:bg-amber-600"
       >
-        📋 העתק קישור הזמנה
+        📋 העתק קישור אישי
       </button>
-      <div className="mt-4 rounded-2xl bg-white p-3 text-center ring-1 ring-slate-200">
-        <div dir="ltr" className="mx-auto max-w-[260px]" dangerouslySetInnerHTML={{ __html: code128Svg(code, { height: 56, module: 2 }) }} />
+      <div className="mt-3 rounded-2xl bg-white p-3 text-center ring-1 ring-slate-200">
+        <div dir="ltr" className="mx-auto max-w-[280px]" dangerouslySetInnerHTML={{ __html: code128Svg(code, { height: 56, module: 2 }) }} />
         <p dir="ltr" className="mt-1 font-mono text-xs tracking-widest text-slate-600">{code}</p>
         <p className="mt-1 text-[10px] text-slate-400">ברקוד (Code 128) של קוד ההפניה האישי</p>
       </div>
@@ -3137,57 +3310,198 @@ function ReferralCard({ code }) {
     </div>
   );
 }
-function welcomeSeenKey(profileId) {
-  return `mx_welcome_${profileId}`;
+const REFERRAL_TERMS_NOTE = "ההטבה ניתנת לאחר השלמת מסירה ראשונה של הלקוח החדש ואישור הנהלה, וחלה על מסירה הבאה בשווי כולל של לפחות ₪110 לאחר הזיכוי. הפניה עצמית או כפולה אינה זכאית.";
+function ReferralCard({ code }) {
+  if (!referralLinkFor(code)) return null;
+  return (
+    <div className="rounded-3xl border border-amber-200/70 bg-gradient-to-br from-amber-50 to-white p-5 shadow-sm">
+      <p className="text-sm font-bold text-amber-800">🎁 חבר מביא חבר</p>
+      <p className="mt-1 text-xs leading-relaxed text-slate-600">
+        על כל לקוח חדש שמצטרף דרככם ומשלים מסירה ראשונה — גם אתם וגם החבר מקבלים ₪{REFERRAL_CREDIT} זיכוי למסירה הבאה.
+      </p>
+      <div className="mt-3">
+        <ReferralShare code={code} />
+      </div>
+      <p className="mt-3 text-[10px] leading-relaxed text-slate-400">{REFERRAL_TERMS_NOTE}</p>
+    </div>
+  );
 }
-// New = a client account created within the last WELCOME_WINDOW_DAYS and not yet dismissed on this device.
+// Profile tab: the card plus the button that re-opens the welcome / program window.
+function ReferralSection({ profile }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <ReferralCard code={generateReferralCode(profile)} />
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="flex w-full items-center justify-center gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800 hover:bg-amber-100"
+      >
+        🎁 תוכנית חבר מביא חבר והברקוד האישי
+      </button>
+      {open && <WelcomeModal profile={profile} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+function welcomeSeenKey(profileId) {
+  return `welcomeSeen_${profileId}`;
+}
+// Shown once per client account (law firm / company / institution) on each device.
 function shouldShowWelcome(profile) {
-  if (!profile || profile.role !== "lawyer" || !profile.created_at) return false;
-  const age = Date.now() - new window.Date(profile.created_at).getTime();
-  if (!Number.isFinite(age) || age < -60000 || age > WELCOME_WINDOW_DAYS * 86400000) return false;
+  if (!profile || profile.role !== "lawyer" || !profile.id) return false;
   try {
     return window.localStorage.getItem(welcomeSeenKey(profile.id)) !== "1";
   } catch (e) {
-    return true;
+    return false;
   }
 }
 function WelcomeModal({ profile, onClose }) {
-  const [toast, copy] = useCopyToast();
-  const code = referralCodeFor(profile.id);
-  const link = referralLinkFor(code);
+  const code = generateReferralCode(profile);
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 p-4" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
       <div className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-3xl bg-white shadow-2xl">
         <div className="rounded-t-3xl bg-gradient-to-br from-indigo-700 via-indigo-600 to-blue-600 px-6 py-6 text-center text-white">
           <div className="text-4xl" aria-hidden="true">🎉</div>
           <h2 id="welcome-title" className="mt-2 text-lg font-extrabold leading-snug">
-            ברוכים הבאים למערכת mesirot.express — הבית של המסירות המשפטיות והמוסדיות בישראל! ⚖️
+            ברוכים הבאים ל-mesirot.express — הבית של המסירות המשפטיות והמוסדיות בישראל! ⚖️
           </h2>
         </div>
         <div className="space-y-4 px-6 py-5">
           <p className="text-sm leading-relaxed text-slate-700">
-            אנו שמחים וגאים לארח אתכם בפלטפורמה המתקדמת בישראל. הצוות שלנו מתחייב לספק לכם שירות מהיר, שקוף, מגובה ב-GPS ובעל תוקף משפטי מלא לכל צורך בנקאי, עירוני ומשפטי.
+            אנו שמחים וגאים לצרף אתכם לפלטפורמת המסירות המתקדמת בישראל. אנו מתחייבים להעניק לכם את השירות הטוב, המהיר והאמין ביותר — עם תיעוד GPS מלא, עמידה קפדנית בדרישות החוק ושקיפות מלאה בכל שלב.
           </p>
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
             <p className="text-sm font-bold leading-relaxed text-amber-900">
-              🎁 הטבת הצטרפות בלעדית: שתפו את קישור ההזמנה או הברקוד האישי שלכם עם עורכי דין, חברות או מוסדות נוספים. על כל חבר שיצטרף דרככם ויבצע מסירה ראשונה — החבר יקבל מסירה ראשונה חינם, ואתם תרוויחו זיכוי ₪50 אוטומטי!
+              🎁 הטבת חבר מביא חבר: שתפו את הברקוד או הקישור האישי שלכם עם עמיתים, משרדי עורכי דין וחברות. על כל לקוח חדש שמצטרף דרככם ומשלים מסירה ראשונה — גם אתם וגם החבר מקבלים ₪50 זיכוי למסירה הבאה!
             </p>
-            {link && (
-              <button
-                type="button"
-                onClick={() => copy(link, "הקישור הועתק ✓")}
-                className="mt-3 w-full rounded-xl border border-amber-300 bg-white px-3 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100"
-              >
-                📋 העתק קישור הזמנה
-              </button>
-            )}
+            <div className="mt-3">
+              <ReferralShare code={code} />
+            </div>
+            <p className="mt-3 text-[10px] leading-relaxed text-amber-900/70">{REFERRAL_TERMS_NOTE}</p>
           </div>
           <button type="button" onClick={onClose} className="w-full rounded-2xl bg-indigo-600 px-4 py-3 text-base font-bold text-white hover:bg-indigo-700">
             התחל לשלוח מסירות 🚀
           </button>
         </div>
       </div>
-      <CopyToast toast={toast} />
+    </div>
+  );
+}
+// Admin: "🎁 מעקב חבר מביא חבר ובקרת זיכויים".
+function ReferralControlPanel({ lawyers, orders, ledger, onApprove, onApplyCredit }) {
+  const rows = useMemo(() => buildReferralRows({ lawyers, orders, ledger }), [lawyers, orders, ledger]);
+  const led = ledger || {};
+  // Credits on orders that the ledger does not account for (possible tampering).
+  const stray = (orders || []).filter((o) => {
+    if (!o.referralCredit) return false;
+    return !Object.values(led).some((e) => ["friend", "referrer"].some((k) => e.credits && e.credits[k] && e.credits[k].appliedOrderId === o.id));
+  });
+  const when = (iso) => (iso ? new window.Date(iso).toLocaleDateString("he-IL") : "—");
+  const approve = (r) => {
+    if (r.ledger || r.fraudFlag || !r.firstCompleted || !r.referrer) return;
+    const ok = window.confirm(
+      `לאשר זיכוי ₪${REFERRAL_CREDIT} לממליץ (${r.referrer.name}) ולחבר (${r.referred.name})?\\n\\nהאישור סופי ולא ניתן לביטול, ולא ניתן לאשר פעמיים עבור אותו לקוח.`
+    );
+    if (ok) onApprove(r);
+  };
+  const creditCell = (r, side, holder, label) => {
+    const c = r.ledger && r.ledger.credits && r.ledger.credits[side];
+    if (!c) return null;
+    const eligible = !c.appliedOrderId && eligibleCreditOrder(holder, orders);
+    return (
+      <div key={side} className="flex flex-wrap items-center gap-1.5">
+        <span className="text-[11px] text-slate-600">{label}:</span>
+        {c.appliedOrderId ? (
+          <span className={`${PILL} bg-emerald-50 text-emerald-700 ring-emerald-200`}>הוחל על {c.appliedOrderId}</span>
+        ) : (
+          <button
+            type="button"
+            disabled={!eligible}
+            onClick={() => onApplyCredit(r.referredId, side)}
+            title={eligible ? `יוחל על ${eligible.id}` : `אין הזמנה ממתינה לשיוך שמאפשרת ₪${REFERRAL_CREDIT} מלא (מינימום ₪${REFERRAL_MIN_ORDER})`}
+            className="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700 enabled:hover:bg-indigo-100 disabled:opacity-50"
+          >
+            {eligible ? `החל על ${eligible.id}` : "ממתין להזמנה מתאימה"}
+          </button>
+        )}
+      </div>
+    );
+  };
+  return (
+    <div className="space-y-3">
+      <div>
+        <h3 className="text-base font-bold text-amber-700">🎁 מעקב חבר מביא חבר ובקרת זיכויים</h3>
+        <p className="text-xs text-slate-500">
+          זיכוי ₪{REFERRAL_CREDIT} לכל צד, רק לאחר מסירה ראשונה שהושלמה ואישור מנהל. מחיר הזמנה לא יורד מתחת ל-₪{REFERRAL_MIN_ORDER}. לקוח מופיע כאן מהזמנתו הראשונה.
+        </p>
+      </div>
+      {stray.length > 0 && (
+        <p role="alert" className="rounded-xl bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 ring-1 ring-rose-200">
+          ⚠️ זיכוי הפניה על הזמנות ללא אישור ביומן הזיכויים: {stray.map((o) => o.id).join(", ")}
+        </p>
+      )}
+      <div className="overflow-x-auto rounded-2xl border border-slate-200/60 bg-white">
+        <table className="w-full min-w-[820px] text-sm">
+          <thead>
+            <tr className="bg-slate-50 text-right text-xs text-slate-400">
+              <th className="px-3 py-2 font-medium">הממליץ</th>
+              <th className="px-3 py-2 font-medium">הלקוח שהצטרף</th>
+              <th className="px-3 py-2 font-medium">תאריך הצטרפות</th>
+              <th className="px-3 py-2 font-medium">סטטוס מסירה ראשונה</th>
+              <th className="px-3 py-2 font-medium">אישור מנהל</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.referredId} className="border-t border-slate-100 align-top">
+                <td className="px-3 py-2.5 text-slate-700">
+                  <p className="font-medium">{r.referrer ? r.referrer.name : "—"}</p>
+                  <p dir="ltr" className="text-left font-mono text-[10px] text-slate-400">{r.code}</p>
+                </td>
+                <td className="px-3 py-2.5 font-medium text-slate-700">{r.referred.name}</td>
+                <td className="px-3 py-2.5 text-slate-500">{when(r.joinedAt)}</td>
+                <td className="px-3 py-2.5 text-xs">
+                  {r.fraudFlag ? (
+                    <div>
+                      <span className={`${PILL} bg-rose-50 text-rose-700 ring-rose-200`}>⚠️ חשד להפניה עצמית</span>
+                      <p className="mt-1 text-[11px] leading-snug text-rose-700">{r.fraudReason}</p>
+                    </div>
+                  ) : r.firstCompleted ? (
+                    <span className={`${PILL} bg-emerald-50 text-emerald-700 ring-emerald-200`}>הושלמה מסירה ראשונה</span>
+                  ) : (
+                    <span className={`${PILL} bg-amber-50 text-amber-700 ring-amber-200`}>⏳ ממתין להשלמת מסירה ראשונה</span>
+                  )}
+                </td>
+                <td className="px-3 py-2.5">
+                  {r.ledger ? (
+                    <div className="space-y-1">
+                      <span className={`${PILL} bg-slate-100 text-slate-700 ring-slate-300`}>🔒 זיכוי אושר ומומש</span>
+                      {creditCell(r, "friend", r.referred, "החבר")}
+                      {r.referrer && creditCell(r, "referrer", r.referrer, "הממליץ")}
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={r.fraudFlag || !r.firstCompleted || !r.referrer}
+                      onClick={() => approve(r)}
+                      className="rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-bold text-white enabled:hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      ✅ אשר זיכוי ₪{REFERRAL_CREDIT}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={5} className="py-8 text-center text-sm text-slate-400">
+                  עדיין אין לקוחות שהצטרפו דרך הפניה
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -3215,7 +3529,7 @@ function ProfileTab({ role, subtitle, onSwitchRole }) {
             <Check className="h-2.5 w-2.5" /> מחובר · סנכרון בזמן אמת
           </span>
         </div>
-        {pf.role === "lawyer" && <ReferralCard code={referralCodeFor(pf.id)} />}
+        {pf.role === "lawyer" && <ReferralSection profile={pf} />}
         <button
           type="button"
           onClick={session.signOut}
@@ -4038,6 +4352,9 @@ function OrderDetailsModal({ order, onClose, onOpenAffidavit, onCancel, showPric
           <InfoRow label="סוג מסמך" value={order.docType === "אחר" ? order.customDocType || "אחר" : order.docType} />
           <InfoRow label="שליח משובץ" value={order.assignedCourier || "טרם שובץ"} />
           {showPrice && <InfoRow label="מחיר ללקוח" value={formatILS(calcClientPrice(order).total)} />}
+          {showPrice && calcClientPrice(order).referralCredit > 0 && (
+            <InfoRow label="זיכוי חבר מביא חבר" value={`−${formatILS(calcClientPrice(order).referralCredit)}`} />
+          )}
         </div>
         {order.notes && (
           <div className="rounded-lg bg-slate-50 p-3 text-sm text-slate-600">
@@ -8238,16 +8555,15 @@ function CourierRegistrationModal({ open, onClose, onSubmit }) {
 // are currently assigned to them vs. how many they've completed), pulled
 // straight from the current `orders` list so the numbers are always fresh.
 // Admin: registered law firms / clients with the same block / restore switch as couriers.
-function LawyerDirectory({ lawyers, orders, onSetBlocked, onGrantReferral }) {
-  // Referral per client: read from the client's earliest order that carries order.referral.
-  const referralOf = (l) => {
-    const mine = orders.filter((o) => o.referral && (o.lawyerId === l.id || (!o.lawyerId && o.submittedBy === l.name)));
-    if (!mine.length) return null;
-    const first = mine[mine.length - 1];
-    const code = first.referral.code;
-    const ref = lawyers.find((x) => referralCodeFor(x.id) === code);
-    return { orderId: first.id, code, referrerName: ref ? ref.name : "", rewards: first.referral.rewards || {} };
-  };
+function LawyerDirectory({ lawyers, orders, onSetBlocked }) {
+  // Badge "הצטרף דרך" per referred client (approvals live in ReferralControlPanel).
+  const referralByClient = useMemo(() => {
+    const m = {};
+    buildReferralRows({ lawyers, orders, ledger: {} }).forEach((r) => {
+      m[r.referredId] = r;
+    });
+    return m;
+  }, [lawyers, orders]);
   const countFor = (l) => orders.filter((o) => o.lawyerId === l.id || (!o.lawyerId && o.submittedBy === l.name)).length;
   return (
     <div className="space-y-3">
@@ -8273,35 +8589,14 @@ function LawyerDirectory({ lawyers, orders, onSetBlocked, onGrantReferral }) {
                 <td className="px-3 py-2.5 text-slate-500" dir="ltr">{l.email}</td>
                 <td className="px-3 py-2.5 text-slate-600">{countFor(l)}</td>
                 <td className="px-3 py-2.5 text-xs">
-                  {(() => {
-                    const r = referralOf(l);
-                    if (!r) return <span className="text-slate-300" title="מופיע לאחר ההזמנה הראשונה של הלקוח">—</span>;
-                    const btn = (key, label) => (
-                      <button
-                        key={key}
-                        type="button"
-                        disabled={!onGrantReferral}
-                        onClick={() => onGrantReferral && onGrantReferral(r.orderId, key)}
-                        className={`rounded-md px-1.5 py-0.5 text-[10px] font-semibold ${
-                          r.rewards[key] ? "bg-emerald-600 text-white" : "border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
-                        }`}
-                        title={r.rewards[key] ? `ניתן: ${r.rewards[key]} (לחיצה לביטול)` : "סמן כניתן"}
-                      >
-                        {r.rewards[key] ? "✔ " : ""}{label}
-                      </button>
-                    );
-                    return (
-                      <div className="space-y-1">
-                        <p className="font-medium text-amber-800">
-                          הצטרף דרך: {r.referrerName || "ממליץ לא מזוהה"} <span dir="ltr" className="font-mono text-[10px] text-slate-400">({r.code})</span>
-                        </p>
-                        <div className="flex flex-wrap gap-1">
-                          {btn("friendFree", "מסירה חינם לחבר")}
-                          {btn("referrerCredit", `זיכוי ₪${REFERRAL_CREDIT} לממליץ`)}
-                        </div>
-                      </div>
-                    );
-                  })()}
+                  {referralByClient[l.id] ? (
+                    <span className={`${PILL} ${referralByClient[l.id].fraudFlag ? "bg-rose-50 text-rose-700 ring-rose-200" : "bg-amber-50 text-amber-800 ring-amber-200"}`} title={referralByClient[l.id].fraudReason || ""}>
+                      🔗 הצטרף דרך: {referralByClient[l.id].referrer ? referralByClient[l.id].referrer.name : "ממליץ לא מזוהה"} (קוד: {referralByClient[l.id].code})
+                      {referralByClient[l.id].fraudFlag ? " ⚠️" : ""}
+                    </span>
+                  ) : (
+                    <span className="text-slate-300" title="מופיע לאחר ההזמנה הראשונה של הלקוח">—</span>
+                  )}
                 </td>
                 <td className="px-3 py-2.5">
                   <div className="flex flex-wrap items-center gap-1.5">
@@ -8582,7 +8877,9 @@ function AdminDashboard({
   onRegisterCourier,
   onApproveCourier,
   onSetBlocked,
-  onGrantReferral,
+  referralLedger,
+  onApproveReferral,
+  onApplyReferralCredit,
   lawyers = [],
   assignOrderId = "",
   onCloseAssign,
@@ -8747,7 +9044,14 @@ function AdminDashboard({
             onApproveCourier={onApproveCourier}
             onSetBlocked={onSetBlocked}
           />
-          <LawyerDirectory lawyers={lawyers} orders={orders} onSetBlocked={onSetBlocked} onGrantReferral={onGrantReferral} />
+          <LawyerDirectory lawyers={lawyers} orders={orders} onSetBlocked={onSetBlocked} />
+          <ReferralControlPanel
+            lawyers={lawyers || []}
+            orders={orders}
+            ledger={referralLedger}
+            onApprove={onApproveReferral}
+            onApplyCredit={onApplyReferralCredit}
+          />
         </div>
       )}
 
@@ -9781,6 +10085,7 @@ async function cloudFetchLawyers() {
     licenseNo: p.bar_license_no || "",
     address: p.office_address || "",
     blocked: !!p.blocked,
+    createdAt: p.created_at || "",
   }));
 }
 
@@ -9795,9 +10100,10 @@ async function cloudFetchCouriers() {
 async function cloudFetchSettings() {
   const { data, error } = await supabase.from("settings").select("*");
   if (error) throw error;
-  const out = { pricing: null, payments: {}, adjustments: [], payrollKeys: [] };
+  const out = { pricing: null, payments: {}, adjustments: [], payrollKeys: [], referrals: null };
   (data || []).forEach((row) => {
     if (row.key === "pricing") out.pricing = row.value;
+    else if (row.key === "referrals") out.referrals = row.value && typeof row.value === "object" ? row.value : {};
     else if (row.key.startsWith("payroll:")) {
       out.payrollKeys.push(row.key);
       const v = row.value || {};
@@ -10181,11 +10487,14 @@ function useAuth() {
   };
 
   // Law firm / company: only name + credentials.
-  const signUpLawyer = ({ email, password, fullName, referredBy }) =>
+  const signUpLawyer = ({ email, password, fullName, referredBy, refDeviceMatch }) =>
     register(email, password, {
       account_type: "lawyer",
       full_name: fullName.trim(),
-      ...(referredBy && REFERRAL_RE.test(referredBy) ? { referred_by: referredBy } : {}),
+      // Referral data is accepted only here, at account creation (never later).
+      ...(referredBy && verifyReferralCode(referredBy).ok
+        ? { referred_by: verifyReferralCode(referredBy).code, ref_device_match: !!refDeviceMatch }
+        : {}),
     });
 
   // Courier: full onboarding payload. On success the admin is notified via the webhook.
@@ -10362,6 +10671,7 @@ function useCloudStore(profile, setters) {
         if (st.pricing) settersRef.current.setPricing(st.pricing);
         settersRef.current.setPayments(st.payments);
         settersRef.current.setAdjustments(st.adjustments);
+        if (st.referrals && settersRef.current.setReferralLedger) settersRef.current.setReferralLedger(st.referrals);
         st.payrollKeys.forEach((k) => payrollKeysRef.current.add(k));
       } catch (e) {
         setError(e.message || String(e));
@@ -10876,8 +11186,9 @@ const EMPTY_COURIER_FORM = {
 //   mode "courier" courier join request: name, phone, city, region, license, business type
 //   mode "sent"    "check your inbox to verify your email" confirmation
 function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPassword, profileError, notice = "", onClearNotice }) {
-  // An invitation link (?ref=MX-…) opens the sign-up form and is remembered.
+  // An invitation link (?ref=REF-…) opens the sign-up form and is remembered.
   const [refCode] = useState(() => captureReferralFromUrl());
+  const [refInput, setRefInput] = useState(refCode);
   const [mode, setMode] = useState(() =>
     typeof window !== "undefined" && (window.location.pathname === "/register" || /[?&]ref=/.test(window.location.search))
       ? "lawyer"
@@ -10924,7 +11235,15 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
     e.preventDefault();
     setBusy(true);
     setError("");
-    const res = await onSignUpLawyer({ ...lawyer, referredBy: refCode });
+    // Layer A (client side): a typed / pasted code must pass the checksum.
+    const rawRef = refInput.trim();
+    const vr = verifyReferralCode(rawRef);
+    if (rawRef && !vr.ok) {
+      setError("קוד ההפניה אינו תקין. בדקו שהעתקתם אותו במלואו, או השאירו את השדה ריק.");
+      setBusy(false);
+      return;
+    }
+    const res = await onSignUpLawyer({ ...lawyer, referredBy: vr.ok ? vr.code : "", refDeviceMatch: vr.ok && deviceHasReferrer(vr.code) });
     if (res.error) setError(friendlyAuthError(res.error));
     else if (res.needsConfirm) {
       setSent({ kind: "lawyer", email: lawyer.email.trim() });
@@ -11127,7 +11446,7 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
         {/* ---------------- Law firm / company registration ---------------- */}
         {mode === "lawyer" && refCode && (
           <p className="mb-3 rounded-xl bg-amber-50 px-3 py-2 text-center text-xs font-semibold text-amber-800 ring-1 ring-amber-200">
-            🎁 הוזמנתם על ידי חבר — מסירה ראשונה חינם!
+            🎁 הוזמנתם על ידי חבר — ₪50 זיכוי למסירה הבאה, לאחר השלמת מסירה ראשונה ואישור הנהלה.
           </p>
         )}
         {mode === "lawyer" && (
@@ -11163,6 +11482,17 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
                   autoComplete="new-password"
                   minLength={6}
                   required
+                />
+              </Field>
+              <Field label="קוד הפניה (אם קיבלתם מחבר)">
+                <input
+                  dir="ltr"
+                  className={inputCls}
+                  value={refInput}
+                  onChange={(e) => setRefInput(e.target.value.toUpperCase())}
+                  placeholder="REF-XXXXXXXX-XXXX"
+                  autoComplete="off"
+                  maxLength={20}
                 />
               </Field>
             </div>
@@ -11612,14 +11942,19 @@ function AppInner() {
       profile={auth.profile}
       onSignOut={auth.signOut}
       referredBy={(auth.session.user.user_metadata && auth.session.user.user_metadata.referred_by) || ""}
+      referralDeviceMatch={!!(auth.session.user.user_metadata && auth.session.user.user_metadata.ref_device_match)}
     />
   );
 }
 
-function AppShell({ profile, onSignOut, referredBy = "" }) {
+function AppShell({ profile, onSignOut, referredBy = "", referralDeviceMatch = false }) {
   const cloudOn = !!profile;
   // Welcome modal for brand-new clients (dismissal is remembered on this device).
   const [showWelcome, setShowWelcome] = useState(() => shouldShowWelcome(profile));
+  // Remember (this browser only) which client accounts signed in here — Layer B device check.
+  useEffect(() => {
+    if (profile && profile.role === "lawyer") rememberDeviceOwner(profile.id);
+  }, [profile]);
   const closeWelcome = () => {
     try {
       window.localStorage.setItem(welcomeSeenKey(profile.id), "1");
@@ -11676,6 +12011,7 @@ function AppShell({ profile, onSignOut, referredBy = "" }) {
     setPricing,
     setPayments,
     setAdjustments,
+    setReferralLedger: (v) => setReferralLedger(v),
   });
   const persistOrders = cloud.persistOrders;
   const cloudCancelOrder = cloud.cancelOrder;
@@ -11824,9 +12160,11 @@ function AppShell({ profile, onSignOut, referredBy = "" }) {
         bankConfidential: form.deliveryTrack === "bank" ? form.bankConfidential !== false : false,
         packageDescription: form.packageDescription || "",
         // Referral attribution (a client who joined through an invitation link).
-        ...(cloudOn && profile.role === "lawyer" && REFERRAL_RE.test(referredBy) && referredBy !== referralCodeFor(profile.id)
-          ? { referral: { code: referredBy } }
+        // Never taken from the form: only the sign-up metadata can set it, and a client's own code is ignored.
+        ...(cloudOn && profile.role === "lawyer" && verifyReferralCode(referredBy).ok && referredBy !== generateReferralCode(profile)
+          ? { referral: { code: referredBy, deviceMatch: !!referralDeviceMatch || deviceHasReferrer(referredBy) } }
           : {}),
+        referralCredit: null,
         status: STATUS.PENDING,
         assignedCourier: "",
         createdDate: nowStamp(0),
@@ -11869,18 +12207,64 @@ function AppShell({ profile, onSignOut, referredBy = "" }) {
     if (!cloudOn) notifyNewOrderEverywhere(newOrder);
   }, [cloudOn, profile, referredBy, setOrders, cloudNextOrderId]);
 
-  // Admin marks a referral reward as granted (stored on the referred client's order).
-  const handleGrantReferral = useCallback(
-    (orderId, key) => {
-      setOrders((prev) =>
-        prev.map((o) =>
-          o.id === orderId && o.referral
-            ? { ...o, referral: { ...o.referral, rewards: { ...(o.referral.rewards || {}), [key]: o.referral.rewards && o.referral.rewards[key] ? null : nowStamp(0) } } }
-            : o
-        )
-      );
+  // "חבר מביא חבר" — admin-only reward ledger (settings key "referrals"; one entry per
+  // referred client, so a reward can never be approved twice for the same user).
+  const [referralLedger, setReferralLedgerState] = useState({});
+  const ledgerRef = useRef({});
+  const setReferralLedger = useCallback((next) => {
+    ledgerRef.current = next || {};
+    setReferralLedgerState(next || {});
+  }, []);
+  const saveReferralLedger = useCallback(
+    (next) => {
+      setReferralLedger(next);
+      if (cloudOn) cloud.saveSetting("referrals", next);
     },
-    [setOrders]
+    [cloudOn, cloud.saveSetting, setReferralLedger] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const handleApproveReferral = useCallback(
+    (row) => {
+      if (!row || ledgerRef.current[row.referredId]) return false; // one-way lock
+      // Re-check everything against the current data before locking.
+      const fresh = buildReferralRows({ lawyers, orders: ordersRef.current, ledger: ledgerRef.current }).find((r) => r.referredId === row.referredId);
+      if (!fresh || fresh.fraudFlag || !fresh.firstCompleted || !fresh.referrer) return false;
+      saveReferralLedger({
+        ...ledgerRef.current,
+        [row.referredId]: {
+          referrerId: fresh.referrer.id,
+          code: fresh.code,
+          approvedAt: new window.Date().toISOString(),
+          approvedBy: profile ? profile.full_name : "admin",
+          credits: {
+            friend: { holderId: fresh.referred.id, amount: REFERRAL_CREDIT, appliedOrderId: null, appliedAt: null },
+            referrer: { holderId: fresh.referrer.id, amount: REFERRAL_CREDIT, appliedOrderId: null, appliedAt: null },
+          },
+        },
+      });
+      return true;
+    },
+    [lawyers, profile, saveReferralLedger]
+  );
+  // Attaches an approved ₪50 credit to the holder's next unassigned order (≥ ₪110 after credit).
+  const handleApplyReferralCredit = useCallback(
+    (referredId, side) => {
+      const entry = ledgerRef.current[referredId];
+      const credit = entry && entry.credits && entry.credits[side];
+      if (!credit || credit.appliedOrderId) return false;
+      const holder = lawyers.find((l) => l.id === credit.holderId);
+      const target = holder && eligibleCreditOrder(holder, ordersRef.current);
+      if (!target) return false;
+      setOrders((prev) => prev.map((o) => (o.id === target.id ? { ...o, referralCredit: { amount: REFERRAL_CREDIT, ledgerId: referredId, side } } : o)));
+      saveReferralLedger({
+        ...ledgerRef.current,
+        [referredId]: {
+          ...entry,
+          credits: { ...entry.credits, [side]: { ...credit, appliedOrderId: target.id, appliedAt: new window.Date().toISOString() } },
+        },
+      });
+      return true;
+    },
+    [lawyers, setOrders, saveReferralLedger]
   );
 
   // Lawyer cancels an order that has no courier yet. Re-checks the rule against
@@ -12252,7 +12636,9 @@ function AppShell({ profile, onSignOut, referredBy = "" }) {
           onRegisterCourier={handleRegisterCourier}
           onApproveCourier={cloud.approveCourier}
           onSetBlocked={handleSetBlocked}
-          onGrantReferral={handleGrantReferral}
+          referralLedger={referralLedger}
+          onApproveReferral={handleApproveReferral}
+          onApplyReferralCredit={handleApplyReferralCredit}
           lawyers={lawyers}
           assignOrderId={assignOrderId}
           onCloseAssign={closeAssign}
