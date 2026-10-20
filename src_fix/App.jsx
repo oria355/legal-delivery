@@ -3015,6 +3015,183 @@ function BottomNav({ items, active, onChange }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// "חבר מביא חבר" — referral link, barcode, welcome modal.
+// No SQL: the code is derived from the profile id; the invited user's code
+// travels in auth user_metadata.referred_by and is stamped on that client's
+// orders as order.referral (inside the existing orders.data JSONB).
+// Rewards are tracked and granted by the admin (order.referral.rewards); they
+// are NOT applied to prices automatically.
+// ---------------------------------------------------------------------------
+const REFERRAL_BASE = "https://mesirot.express";
+const REFERRAL_CREDIT = 50;
+const REFERRAL_RE = /^MX-[0-9A-Z]{8}$/;
+const REFERRAL_STORE_KEY = "mx_ref";
+const WELCOME_WINDOW_DAYS = 7;
+function referralCodeFor(profileId) {
+  const hex = String(profileId == null ? "" : profileId).replace(/[^0-9a-zA-Z]/g, "").slice(0, 8).toUpperCase();
+  return hex.length === 8 ? `MX-${hex}` : "";
+}
+function referralLinkFor(code) {
+  return REFERRAL_RE.test(code || "") ? `${REFERRAL_BASE}/register?ref=${code}` : "";
+}
+// Reads ?ref=MX-XXXXXXXX from the URL (validated), remembers it on this device
+// and returns the code to use ("" when none).
+function captureReferralFromUrl() {
+  let code = "";
+  try {
+    const q = new window.URLSearchParams(window.location.search).get("ref");
+    if (q && REFERRAL_RE.test(q.trim().toUpperCase())) code = q.trim().toUpperCase();
+  } catch (e) {
+    /* ignore */
+  }
+  try {
+    if (code) window.localStorage.setItem(REFERRAL_STORE_KEY, code);
+    else {
+      const saved = window.localStorage.getItem(REFERRAL_STORE_KEY) || "";
+      if (REFERRAL_RE.test(saved)) code = saved;
+    }
+  } catch (e) {
+    /* storage unavailable */
+  }
+  return code;
+}
+function copyText(text) {
+  const fallback = () => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) {
+      return false;
+    }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).then(() => true, () => fallback());
+  }
+  return Promise.resolve(fallback());
+}
+// Small self-contained toast (the app had none).
+function CopyToast({ toast }) {
+  if (!toast) return null;
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={`fixed bottom-24 left-1/2 z-[70] -translate-x-1/2 rounded-full px-4 py-2 text-sm font-semibold text-white shadow-lg sm:bottom-8 ${
+        toast.ok ? "bg-emerald-600" : "bg-rose-600"
+      }`}
+    >
+      {toast.text}
+    </div>
+  );
+}
+function useCopyToast() {
+  const [toast, setToast] = useState(null);
+  const timer = useRef(null);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const copy = (text, okText) => {
+    copyText(text).then((ok) => {
+      setToast({ ok, text: ok ? okText : "לא ניתן להעתיק אוטומטית — סמנו והעתיקו ידנית" });
+      window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => setToast(null), 2600);
+    });
+  };
+  return [toast, copy];
+}
+// Personal invitation link + Code 128 barcode of the referral code.
+function ReferralCard({ code }) {
+  const [toast, copy] = useCopyToast();
+  const link = referralLinkFor(code);
+  if (!link) return null;
+  return (
+    <div className="rounded-3xl border border-amber-200/70 bg-gradient-to-br from-amber-50 to-white p-5 shadow-sm">
+      <p className="text-sm font-bold text-amber-800">🎁 חבר מביא חבר</p>
+      <p className="mt-1 text-xs leading-relaxed text-slate-600">
+        חבר שיצטרף דרככם ויבצע מסירה ראשונה — מסירה ראשונה חינם. ואתם: זיכוי ₪{REFERRAL_CREDIT}.
+      </p>
+      <p className="mt-3 text-[11px] font-medium text-slate-400">קישור ההזמנה האישי שלכם</p>
+      <p dir="ltr" className="mt-1 select-all break-all rounded-xl bg-white px-3 py-2 text-left text-xs text-slate-700 ring-1 ring-slate-200">
+        {link}
+      </p>
+      <button
+        type="button"
+        onClick={() => copy(link, "הקישור הועתק ✓")}
+        className="mt-2 w-full rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-bold text-white hover:bg-amber-600"
+      >
+        📋 העתק קישור הזמנה
+      </button>
+      <div className="mt-4 rounded-2xl bg-white p-3 text-center ring-1 ring-slate-200">
+        <div dir="ltr" className="mx-auto max-w-[260px]" dangerouslySetInnerHTML={{ __html: code128Svg(code, { height: 56, module: 2 }) }} />
+        <p dir="ltr" className="mt-1 font-mono text-xs tracking-widest text-slate-600">{code}</p>
+        <p className="mt-1 text-[10px] text-slate-400">ברקוד (Code 128) של קוד ההפניה האישי</p>
+      </div>
+      <CopyToast toast={toast} />
+    </div>
+  );
+}
+function welcomeSeenKey(profileId) {
+  return `mx_welcome_${profileId}`;
+}
+// New = a client account created within the last WELCOME_WINDOW_DAYS and not yet dismissed on this device.
+function shouldShowWelcome(profile) {
+  if (!profile || profile.role !== "lawyer" || !profile.created_at) return false;
+  const age = Date.now() - new window.Date(profile.created_at).getTime();
+  if (!Number.isFinite(age) || age < -60000 || age > WELCOME_WINDOW_DAYS * 86400000) return false;
+  try {
+    return window.localStorage.getItem(welcomeSeenKey(profile.id)) !== "1";
+  } catch (e) {
+    return true;
+  }
+}
+function WelcomeModal({ profile, onClose }) {
+  const [toast, copy] = useCopyToast();
+  const code = referralCodeFor(profile.id);
+  const link = referralLinkFor(code);
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 p-4" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+      <div className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-3xl bg-white shadow-2xl">
+        <div className="rounded-t-3xl bg-gradient-to-br from-indigo-700 via-indigo-600 to-blue-600 px-6 py-6 text-center text-white">
+          <div className="text-4xl" aria-hidden="true">🎉</div>
+          <h2 id="welcome-title" className="mt-2 text-lg font-extrabold leading-snug">
+            ברוכים הבאים למערכת mesirot.express — הבית של המסירות המשפטיות והמוסדיות בישראל! ⚖️
+          </h2>
+        </div>
+        <div className="space-y-4 px-6 py-5">
+          <p className="text-sm leading-relaxed text-slate-700">
+            אנו שמחים וגאים לארח אתכם בפלטפורמה המתקדמת בישראל. הצוות שלנו מתחייב לספק לכם שירות מהיר, שקוף, מגובה ב-GPS ובעל תוקף משפטי מלא לכל צורך בנקאי, עירוני ומשפטי.
+          </p>
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+            <p className="text-sm font-bold leading-relaxed text-amber-900">
+              🎁 הטבת הצטרפות בלעדית: שתפו את קישור ההזמנה או הברקוד האישי שלכם עם עורכי דין, חברות או מוסדות נוספים. על כל חבר שיצטרף דרככם ויבצע מסירה ראשונה — החבר יקבל מסירה ראשונה חינם, ואתם תרוויחו זיכוי ₪50 אוטומטי!
+            </p>
+            {link && (
+              <button
+                type="button"
+                onClick={() => copy(link, "הקישור הועתק ✓")}
+                className="mt-3 w-full rounded-xl border border-amber-300 bg-white px-3 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100"
+              >
+                📋 העתק קישור הזמנה
+              </button>
+            )}
+          </div>
+          <button type="button" onClick={onClose} className="w-full rounded-2xl bg-indigo-600 px-4 py-3 text-base font-bold text-white hover:bg-indigo-700">
+            התחל לשלוח מסירות 🚀
+          </button>
+        </div>
+      </div>
+      <CopyToast toast={toast} />
+    </div>
+  );
+}
+
 // Simple role-aware "profile" screen shown as the last bottom-nav tab on
 // every role — reflects the simulated identity and offers the role switch
 // as an explicit, discoverable action (like a real login/account screen).
@@ -3038,6 +3215,7 @@ function ProfileTab({ role, subtitle, onSwitchRole }) {
             <Check className="h-2.5 w-2.5" /> מחובר · סנכרון בזמן אמת
           </span>
         </div>
+        {pf.role === "lawyer" && <ReferralCard code={referralCodeFor(pf.id)} />}
         <button
           type="button"
           onClick={session.signOut}
@@ -8060,7 +8238,16 @@ function CourierRegistrationModal({ open, onClose, onSubmit }) {
 // are currently assigned to them vs. how many they've completed), pulled
 // straight from the current `orders` list so the numbers are always fresh.
 // Admin: registered law firms / clients with the same block / restore switch as couriers.
-function LawyerDirectory({ lawyers, orders, onSetBlocked }) {
+function LawyerDirectory({ lawyers, orders, onSetBlocked, onGrantReferral }) {
+  // Referral per client: read from the client's earliest order that carries order.referral.
+  const referralOf = (l) => {
+    const mine = orders.filter((o) => o.referral && (o.lawyerId === l.id || (!o.lawyerId && o.submittedBy === l.name)));
+    if (!mine.length) return null;
+    const first = mine[mine.length - 1];
+    const code = first.referral.code;
+    const ref = lawyers.find((x) => referralCodeFor(x.id) === code);
+    return { orderId: first.id, code, referrerName: ref ? ref.name : "", rewards: first.referral.rewards || {} };
+  };
   const countFor = (l) => orders.filter((o) => o.lawyerId === l.id || (!o.lawyerId && o.submittedBy === l.name)).length;
   return (
     <div className="space-y-3">
@@ -8075,6 +8262,7 @@ function LawyerDirectory({ lawyers, orders, onSetBlocked }) {
               <th className="px-3 py-2 font-medium">שם / משרד</th>
               <th className="px-3 py-2 font-medium">אימייל</th>
               <th className="px-3 py-2 font-medium">הזמנות</th>
+              <th className="px-3 py-2 font-medium">הצטרף דרך</th>
               <th className="px-3 py-2 font-medium">סטטוס</th>
             </tr>
           </thead>
@@ -8084,6 +8272,37 @@ function LawyerDirectory({ lawyers, orders, onSetBlocked }) {
                 <td className="px-3 py-2.5 font-medium text-slate-700">{l.name}</td>
                 <td className="px-3 py-2.5 text-slate-500" dir="ltr">{l.email}</td>
                 <td className="px-3 py-2.5 text-slate-600">{countFor(l)}</td>
+                <td className="px-3 py-2.5 text-xs">
+                  {(() => {
+                    const r = referralOf(l);
+                    if (!r) return <span className="text-slate-300" title="מופיע לאחר ההזמנה הראשונה של הלקוח">—</span>;
+                    const btn = (key, label) => (
+                      <button
+                        key={key}
+                        type="button"
+                        disabled={!onGrantReferral}
+                        onClick={() => onGrantReferral && onGrantReferral(r.orderId, key)}
+                        className={`rounded-md px-1.5 py-0.5 text-[10px] font-semibold ${
+                          r.rewards[key] ? "bg-emerald-600 text-white" : "border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                        }`}
+                        title={r.rewards[key] ? `ניתן: ${r.rewards[key]} (לחיצה לביטול)` : "סמן כניתן"}
+                      >
+                        {r.rewards[key] ? "✔ " : ""}{label}
+                      </button>
+                    );
+                    return (
+                      <div className="space-y-1">
+                        <p className="font-medium text-amber-800">
+                          הצטרף דרך: {r.referrerName || "ממליץ לא מזוהה"} <span dir="ltr" className="font-mono text-[10px] text-slate-400">({r.code})</span>
+                        </p>
+                        <div className="flex flex-wrap gap-1">
+                          {btn("friendFree", "מסירה חינם לחבר")}
+                          {btn("referrerCredit", `זיכוי ₪${REFERRAL_CREDIT} לממליץ`)}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </td>
                 <td className="px-3 py-2.5">
                   <div className="flex flex-wrap items-center gap-1.5">
                     {l.blocked ? (
@@ -8114,7 +8333,7 @@ function LawyerDirectory({ lawyers, orders, onSetBlocked }) {
             ))}
             {lawyers.length === 0 && (
               <tr>
-                <td colSpan={4} className="py-8 text-center text-sm text-slate-400">
+                <td colSpan={5} className="py-8 text-center text-sm text-slate-400">
                   אין עדיין עורכי דין או לקוחות רשומים
                 </td>
               </tr>
@@ -8363,6 +8582,7 @@ function AdminDashboard({
   onRegisterCourier,
   onApproveCourier,
   onSetBlocked,
+  onGrantReferral,
   lawyers = [],
   assignOrderId = "",
   onCloseAssign,
@@ -8527,7 +8747,7 @@ function AdminDashboard({
             onApproveCourier={onApproveCourier}
             onSetBlocked={onSetBlocked}
           />
-          <LawyerDirectory lawyers={lawyers} orders={orders} onSetBlocked={onSetBlocked} />
+          <LawyerDirectory lawyers={lawyers} orders={orders} onSetBlocked={onSetBlocked} onGrantReferral={onGrantReferral} />
         </div>
       )}
 
@@ -9961,8 +10181,12 @@ function useAuth() {
   };
 
   // Law firm / company: only name + credentials.
-  const signUpLawyer = ({ email, password, fullName }) =>
-    register(email, password, { account_type: "lawyer", full_name: fullName.trim() });
+  const signUpLawyer = ({ email, password, fullName, referredBy }) =>
+    register(email, password, {
+      account_type: "lawyer",
+      full_name: fullName.trim(),
+      ...(referredBy && REFERRAL_RE.test(referredBy) ? { referred_by: referredBy } : {}),
+    });
 
   // Courier: full onboarding payload. On success the admin is notified via the webhook.
   const signUpCourier = async (f) => {
@@ -10652,7 +10876,13 @@ const EMPTY_COURIER_FORM = {
 //   mode "courier" courier join request: name, phone, city, region, license, business type
 //   mode "sent"    "check your inbox to verify your email" confirmation
 function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPassword, profileError, notice = "", onClearNotice }) {
-  const [mode, setMode] = useState("in");
+  // An invitation link (?ref=MX-…) opens the sign-up form and is remembered.
+  const [refCode] = useState(() => captureReferralFromUrl());
+  const [mode, setMode] = useState(() =>
+    typeof window !== "undefined" && (window.location.pathname === "/register" || /[?&]ref=/.test(window.location.search))
+      ? "lawyer"
+      : "in"
+  );
   const [login, setLogin] = useState({ email: "", password: "" });
   const [lawyer, setLawyer] = useState(EMPTY_LAWYER_FORM);
   const [courier, setCourier] = useState(EMPTY_COURIER_FORM);
@@ -10694,7 +10924,7 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
     e.preventDefault();
     setBusy(true);
     setError("");
-    const res = await onSignUpLawyer(lawyer);
+    const res = await onSignUpLawyer({ ...lawyer, referredBy: refCode });
     if (res.error) setError(friendlyAuthError(res.error));
     else if (res.needsConfirm) {
       setSent({ kind: "lawyer", email: lawyer.email.trim() });
@@ -10895,6 +11125,11 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
         )}
 
         {/* ---------------- Law firm / company registration ---------------- */}
+        {mode === "lawyer" && refCode && (
+          <p className="mb-3 rounded-xl bg-amber-50 px-3 py-2 text-center text-xs font-semibold text-amber-800 ring-1 ring-amber-200">
+            🎁 הוזמנתם על ידי חבר — מסירה ראשונה חינם!
+          </p>
+        )}
         {mode === "lawyer" && (
           <form onSubmit={submitLawyer}>
             <div className="space-y-3">
@@ -11371,11 +11606,28 @@ function AppInner() {
   if (auth.profile.role === "courier" && auth.profile.approval_status === "pending") {
     return <PendingApprovalScreen profile={auth.profile} onRefresh={auth.refreshProfile} onSignOut={auth.signOut} />;
   }
-  return <AppShell key={auth.profile.id} profile={auth.profile} onSignOut={auth.signOut} />;
+  return (
+    <AppShell
+      key={auth.profile.id}
+      profile={auth.profile}
+      onSignOut={auth.signOut}
+      referredBy={(auth.session.user.user_metadata && auth.session.user.user_metadata.referred_by) || ""}
+    />
+  );
 }
 
-function AppShell({ profile, onSignOut }) {
+function AppShell({ profile, onSignOut, referredBy = "" }) {
   const cloudOn = !!profile;
+  // Welcome modal for brand-new clients (dismissal is remembered on this device).
+  const [showWelcome, setShowWelcome] = useState(() => shouldShowWelcome(profile));
+  const closeWelcome = () => {
+    try {
+      window.localStorage.setItem(welcomeSeenKey(profile.id), "1");
+    } catch (e) {
+      /* ignore */
+    }
+    setShowWelcome(false);
+  };
   const [viewState, setView] = useState("admin");
   // Signed-in users are pinned to the view of their role.
   const view = cloudOn ? profile.role : viewState;
@@ -11571,6 +11823,10 @@ function AppShell({ profile, onSignOut }) {
         maxVisits: form.deliveryTrack === "municipal" || form.deliveryTrack === "bank" ? (Number(form.maxVisits) === 3 ? 3 : 1) : form.deliveryTrack === "standard" ? 1 : 3,
         bankConfidential: form.deliveryTrack === "bank" ? form.bankConfidential !== false : false,
         packageDescription: form.packageDescription || "",
+        // Referral attribution (a client who joined through an invitation link).
+        ...(cloudOn && profile.role === "lawyer" && REFERRAL_RE.test(referredBy) && referredBy !== referralCodeFor(profile.id)
+          ? { referral: { code: referredBy } }
+          : {}),
         status: STATUS.PENDING,
         assignedCourier: "",
         createdDate: nowStamp(0),
@@ -11611,7 +11867,21 @@ function AppShell({ profile, onSignOut }) {
     // Cloud mode fires the webhook after the DB insert succeeds (persistOrders);
     // demo mode has no DB, so it fires right away.
     if (!cloudOn) notifyNewOrderEverywhere(newOrder);
-  }, [cloudOn, profile, setOrders, cloudNextOrderId]);
+  }, [cloudOn, profile, referredBy, setOrders, cloudNextOrderId]);
+
+  // Admin marks a referral reward as granted (stored on the referred client's order).
+  const handleGrantReferral = useCallback(
+    (orderId, key) => {
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId && o.referral
+            ? { ...o, referral: { ...o.referral, rewards: { ...(o.referral.rewards || {}), [key]: o.referral.rewards && o.referral.rewards[key] ? null : nowStamp(0) } } }
+            : o
+        )
+      );
+    },
+    [setOrders]
+  );
 
   // Lawyer cancels an order that has no courier yet. Re-checks the rule against
   // the latest state, then marks it "בוטל" locally and (cloud) via the RPC.
@@ -11911,6 +12181,7 @@ function AppShell({ profile, onSignOut }) {
         <div className="absolute bottom-0 right-1/4 h-80 w-80 rounded-full bg-purple-200/20 blur-3xl" />
       </div>
       <TopNav view={view} setView={setView} />
+      {showWelcome && cloudOn && <WelcomeModal profile={profile} onClose={closeWelcome} />}
       <EvidenceIssueBanner
         issue={cloud.evidenceIssue}
         ok={cloud.evidenceOk}
@@ -11981,6 +12252,7 @@ function AppShell({ profile, onSignOut }) {
           onRegisterCourier={handleRegisterCourier}
           onApproveCourier={cloud.approveCourier}
           onSetBlocked={handleSetBlocked}
+          onGrantReferral={handleGrantReferral}
           lawyers={lawyers}
           assignOrderId={assignOrderId}
           onCloseAssign={closeAssign}
