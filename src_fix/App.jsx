@@ -9603,6 +9603,44 @@ function MarginModal({ order, pricing, onClose }) {
   );
 }
 
+// Admin-only status of device alerts. Each layer is shown on its own so a failure can be located.
+function PushDiagnostics({ permission, push, onEnable, onTest }) {
+  const yes = (v) => (v ? "✅" : "❌");
+  const permText = permission === "granted" ? "ניתנה" : permission === "denied" ? "חסומה בדפדפן" : permission === "unsupported" ? "לא נתמך" : "טרם התבקשה";
+  const last = push.last;
+  return (
+    <div className="rounded-2xl border border-slate-200/60 bg-white p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-bold text-indigo-700">🔔 התראות מסירה חדשה למכשיר זה</p>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={onEnable} className="rounded-xl bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-700">
+            הפעל Push במכשיר זה
+          </button>
+          <button type="button" onClick={onTest} className="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100">
+            שלח התראת בדיקה מהשרת
+          </button>
+        </div>
+      </div>
+      <ul className="mt-3 grid gap-1.5 text-xs text-slate-600 sm:grid-cols-2">
+        <li>{yes(push.supported)} הדפדפן תומך ב-Web Push</li>
+        <li>{yes(permission === "granted")} הרשאת התראות: {permText}</li>
+        <li>{yes(push.keyConfigured)} מפתח VAPID ציבורי הוגדר באפליקציה</li>
+        <li>{yes(push.subscribed)} מנוי פעיל במכשיר{push.host ? ` (${push.host})` : ""}</li>
+        <li>{yes(push.saved)} המנוי נשמר בשרת</li>
+        <li>
+          {last ? (last.status === "sent" ? "✅" : "⚠️") : "➖"} משלוח אחרון מהשרת:{" "}
+          {last ? `${last.status} · נשלחו ${last.sent} · נכשלו ${last.failed}${last.removed ? ` · הוסרו ${last.removed}` : ""}${last.error_codes ? ` · קודים ${last.error_codes}` : ""}` : "אין עדיין רשומה"}
+        </li>
+      </ul>
+      {push.error && <p className="mt-2 text-xs font-medium text-rose-600">{push.error}</p>}
+      {push.test && <p className={`mt-2 text-xs font-medium ${push.test.ok ? "text-emerald-700" : "text-rose-600"}`}>{push.test.text}</p>}
+      <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
+        באייפון Web Push עובד רק לאתר שנוסף למסך הבית (iOS 16.4 ומעלה): שיתוף ← הוסף למסך הבית, לפתוח משם וללחוץ "הפעל Push". קבלה אצל שירות ה-Push אינה מבטיחה שהמכשיר הציג את ההתראה.
+      </p>
+    </div>
+  );
+}
+
 function AdminDashboard({
   orders,
   responses = [],
@@ -9631,6 +9669,9 @@ function AdminDashboard({
   notifyPermission = "unsupported",
   onEnableNotify,
   onTestNotify,
+  pushState = null,
+  onEnablePush,
+  onTestPush,
   onSignAffidavit,
   onDeleteOrder,
   onMarkPickedUp,
@@ -9846,6 +9887,9 @@ function AdminDashboard({
         >
           📲 שלח התראת בדיקה לנייד
         </button>
+      )}
+      {pushState && onEnablePush && (
+        <PushDiagnostics permission={notifyPermission} push={pushState} onEnable={onEnablePush} onTest={onTestPush} />
       )}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         {cards.map((c) => (
@@ -10328,6 +10372,12 @@ const NOTIFY_SUPPORTED = () => typeof window.Notification !== "undefined" && !!w
 // The one and only text of the "new delivery waiting for assignment" alert for
 // the admin — in-app banner, browser / push notification and webhook payloads.
 const ADMIN_NEW_ORDER_MSG = "מסירה חדשה ממתינה לשיבוץ (אבא תודה)";
+// Text of the device notification (local banner + server Web Push in public/sw.js). It must never carry
+// customer data: it is readable on a locked screen.
+const PUSH_TITLE = "Mesirot Express";
+const PUSH_BODY = "מסירה חדשה (אבא תודה)";
+// PUBLIC VAPID key only (safe in the bundle). The private key lives only in the Edge Function's secrets.
+const VAPID_PUBLIC_KEY = import.meta.env.VITE_VAPID_PUBLIC_KEY || "";
 
 async function registerServiceWorker() {
   try {
@@ -10343,9 +10393,8 @@ async function registerServiceWorker() {
 async function showNewOrderNotification(order) {
   const reg = await registerServiceWorker();
   if (!reg) return;
-  const address = [`${order.street || ""} ${order.houseNumber || ""}`.trim(), order.city].filter(Boolean).join(", ");
-  reg.showNotification(ADMIN_NEW_ORDER_MSG, {
-    body: `מס' הזמנה ${formatOrderNum(order.id)} · לקוח: ${order.submittedBy || "—"} · כתובת: ${address || "—"}`,
+  reg.showNotification(PUSH_TITLE, {
+    body: PUSH_BODY, // no customer name / address / phone on the lock screen
     tag: `new-order-${order.id}`,
     dir: "rtl",
     lang: "he",
@@ -10371,11 +10420,116 @@ async function showTestNotification() {
   });
 }
 
-function useAdminOrderAlerts({ enabled, ready, orders, onOpenOrder }) {
+// ---- Web Push (admin device subscription) --------------------------------------------------------
+// Statuses are reported separately: browser support · permission · VAPID key in the app · device
+// subscription · saved on the server · last server delivery. Nothing here shows keys or full endpoints.
+function urlBase64ToUint8Array(b64) {
+  const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+  const raw = window.atob((b64 + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  const out = new window.Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) out[i] = raw.charCodeAt(i);
+  return out;
+}
+const pushSupported = () => NOTIFY_SUPPORTED() && "PushManager" in window;
+function endpointHint(sub) {
+  try {
+    return new window.URL(sub.endpoint).host; // the push service only — never the token part
+  } catch (e) {
+    return "";
+  }
+}
+async function savePushSubscription(sub, profile) {
+  const j = sub.toJSON();
+  if (!j.endpoint || !j.keys) return "מנוי לא תקין";
+  const { error } = await supabase.from("push_subscriptions").upsert(
+    {
+      user_id: profile.id,
+      endpoint: j.endpoint,
+      p256dh: j.keys.p256dh,
+      auth: j.keys.auth,
+      user_agent: String(window.navigator.userAgent || "").slice(0, 200),
+      last_seen: new window.Date().toISOString(),
+    },
+    { onConflict: "endpoint" }
+  );
+  return error ? "שמירת המנוי בשרת נכשלה (ייתכן שהמיגרציה push-notifications.sql טרם הורצה)" : "";
+}
+// create=false: only look at / refresh an existing subscription. create=true: also subscribe (needs a user click).
+async function syncPushSubscription(profile, create) {
+  const st = { supported: pushSupported(), keyConfigured: !!VAPID_PUBLIC_KEY, subscribed: false, saved: false, host: "", error: "" };
+  if (!st.supported) return st;
+  if (!st.keyConfigured) return st;
+  if (window.Notification.permission !== "granted") return st;
+  try {
+    const reg = await registerServiceWorker();
+    if (!reg) {
+      st.error = "ה-service worker לא נרשם";
+      return st;
+    }
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub && create) {
+      const opts = { userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) };
+      try {
+        sub = await reg.pushManager.subscribe(opts);
+      } catch (e) {
+        // an old subscription made with another key blocks subscribe(): drop it once and retry
+        const old = await reg.pushManager.getSubscription();
+        if (old) await old.unsubscribe();
+        sub = await reg.pushManager.subscribe(opts);
+      }
+    }
+    if (sub) {
+      st.subscribed = true;
+      st.host = endpointHint(sub);
+      if (profile && supabase) {
+        const err = await savePushSubscription(sub, profile);
+        st.saved = !err;
+        st.error = err;
+      }
+    }
+  } catch (e) {
+    st.error = "יצירת המנוי נכשלה בדפדפן זה";
+  }
+  return st;
+}
+// Last server-side delivery record (admin-only table; counters and status codes only).
+async function fetchLastPushLog() {
+  if (!supabase) return null;
+  const { data, error } = await supabase.from("push_log").select("status, sent, failed, removed, error_codes, updated_at").order("updated_at", { ascending: false }).limit(1);
+  return error || !data || !data.length ? null : data[0];
+}
+// Admin-only server test (the Edge Function re-checks the caller's role). "accepted" is NOT "displayed".
+async function sendServerPushTest() {
+  if (!supabase) return { ok: false, text: "אין חיבור לענן" };
+  try {
+    const { data, error } = await supabase.functions.invoke("notify-new-order", { body: { test: true } });
+    if (error) return { ok: false, text: "הפונקציה בשרת לא זמינה, לא הוגדרה או סירבה (בדקו Logs ב-Supabase)" };
+    if (data && data.status === "sent") return { ok: true, text: `נשלחה בקשה ל-${data.sent} מכשירים. המכשיר צריך להציג את ההתראה תוך שניות; קבלה אצל שירות ה-Push אינה הוכחה שהוצגה.` };
+    if (data && data.status === "no_subscribers") return { ok: false, text: "אין מכשיר מנהל רשום. לחצו 'הפעל Push במכשיר זה'." };
+    return { ok: false, text: "שירות ה-Push דחה את הבקשה (קודי שגיאה בלוג)" };
+  } catch (e) {
+    return { ok: false, text: "אין חיבור לשרת" };
+  }
+}
+
+function useAdminOrderAlerts({ enabled, ready, orders, onOpenOrder, profile = null }) {
   const [permission, setPermission] = useState(() => (NOTIFY_SUPPORTED() ? window.Notification.permission : "unsupported"));
   const seenRef = useRef(null);
   const openRef = useRef(onOpenOrder);
   openRef.current = onOpenOrder;
+  const [push, setPush] = useState({ supported: pushSupported(), keyConfigured: !!VAPID_PUBLIC_KEY, subscribed: false, saved: false, host: "", error: "", last: null, test: null });
+  const cloudAdmin = !!(profile && profile.role === "admin" && supabase);
+  const refreshPush = async (create) => {
+    const st = await syncPushSubscription(cloudAdmin ? profile : null, !!create);
+    const last = cloudAdmin ? await fetchLastPushLog() : null;
+    setPush((p) => ({ ...p, ...st, last }));
+  };
+  // Look at (and refresh the server copy of) an existing subscription whenever the admin opens the app.
+  useEffect(() => {
+    if (!enabled || !cloudAdmin || !pushSupported()) return;
+    refreshPush(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, cloudAdmin, permission]);
 
   // Register the worker and listen for "notification tapped" messages.
   useEffect(() => {
@@ -10383,6 +10537,7 @@ function useAdminOrderAlerts({ enabled, ready, orders, onOpenOrder }) {
     registerServiceWorker();
     const onMessage = (e) => {
       if (e.data && e.data.type === "assign" && e.data.orderId && e.data.orderId !== "TEST") openRef.current(e.data.orderId);
+      if (e.data && e.data.type === "push-resubscribe" && cloudAdmin && window.Notification.permission === "granted") refreshPush(true);
     };
     window.navigator.serviceWorker.addEventListener("message", onMessage);
     return () => window.navigator.serviceWorker.removeEventListener("message", onMessage);
@@ -10412,7 +10567,17 @@ function useAdminOrderAlerts({ enabled, ready, orders, onOpenOrder }) {
     if (window.Notification.permission !== "granted") await requestPermission();
     if (NOTIFY_SUPPORTED() && window.Notification.permission === "granted") await showTestNotification();
   };
-  return { permission, requestPermission, sendTest };
+  // One click (user gesture, required on iPhone): permission, then subscription, then save on the server.
+  const enablePush = async () => {
+    if (window.Notification.permission !== "granted") await requestPermission();
+    await refreshPush(true);
+  };
+  const testServerPush = async () => {
+    const test = await sendServerPushTest();
+    setPush((p) => ({ ...p, test }));
+    await refreshPush(false);
+  };
+  return { permission, requestPermission, sendTest, push, enablePush, testServerPush };
 }
 
 // Orange one-tap assignment banner — opened by the #assign=<ORDER_ID> link.
@@ -13304,6 +13469,7 @@ function AppShell({ profile, onSignOut, referredBy = "", referralDeviceMatch = f
     ready: !cloudOn || cloud.ready,
     orders,
     onOpenOrder: openAssign,
+    profile,
   });
 
   // Courier answers an open order. Re-checks that it is still open.
@@ -13566,6 +13732,9 @@ function AppShell({ profile, onSignOut, referredBy = "", referralDeviceMatch = f
           notifyPermission={alerts.permission}
           onEnableNotify={alerts.requestPermission}
           onTestNotify={alerts.sendTest}
+          pushState={alerts.push}
+          onEnablePush={alerts.enablePush}
+          onTestPush={alerts.testServerPush}
           onSignAffidavit={handleAdminSignAffidavit}
           onDeleteOrder={handleDeleteOrderPermanently}
           onMarkPickedUp={handleMarkPickedUp}
