@@ -1,11 +1,13 @@
-/* Minimal service worker: lets the admin app show native notification banners
-   (reg.showNotification) and handles taps on them. No caching, no offline mode. */
+/* Service worker (scope "/"): shows the admin's "new delivery" Web Push and handles taps.
+   No caching, no offline mode. The ONLY registered worker is /sw.js (src/App.jsx → registerServiceWorker). */
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
-// Tap on the "מסירה חדשה" banner: focus the open app and tell it which order to
-// assign; if the app is closed, open https://<site>/#assign=<ORDER_ID>.
-// The "שבץ שליח עכשיו" action button and a tap on the body do the same thing.
+// Exact, final alert text. Deliberately contains NO customer data (lock screen safe).
+const NEW_ORDER_TITLE = "Mesirot Express";
+const NEW_ORDER_BODY = "מסירה חדשה (אבא תודה)";
+
+// Tap: focus the open app and tell it which order to assign; if closed, open /#assign=<ORDER_ID>.
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const data = event.notification.data || {};
@@ -16,7 +18,7 @@ self.addEventListener("notificationclick", (event) => {
       for (const client of windows) {
         if ("focus" in client) {
           await client.focus();
-          client.postMessage({ type: "assign", orderId: data.orderId });
+          if (data.orderId && data.orderId !== "TEST") client.postMessage({ type: "assign", orderId: data.orderId });
           return;
         }
       }
@@ -25,27 +27,42 @@ self.addEventListener("notificationclick", (event) => {
   );
 });
 
-// Optional server Web Push (future): same WhatsApp-style banner from a JSON payload
-// { orderId, client, address }. Not used by the in-app notifications above.
+// Server Web Push (Supabase Edge Function notify-new-order). Payload: { orderId, url } only.
 self.addEventListener("push", (event) => {
   let p = {};
   try {
     p = event.data ? event.data.json() : {};
   } catch (e) {
-    /* plain text push */
+    /* payload is optional */
   }
+  const orderId = String(p.orderId || "").slice(0, 40);
   event.waitUntil(
-    self.registration.showNotification("מסירות משפטיות — מסירה חדשה ממתינה לשיבוץ", {
-      body: `מסירה חדשה (#${p.orderId || ""}) מאת ${p.client || "—"} לכתובת ${p.address || "—"} ממתינה לשיבוץ שליח`,
-      icon: "/icon-192.png",
-      badge: "/icon-192.png",
-      dir: "rtl",
-      lang: "he",
-      vibrate: [200, 100, 200],
-      requireInteraction: true,
-      actions: [{ action: "assign", title: "שבץ שליח עכשיו" }],
-      tag: `new-order-${p.orderId || "x"}`,
-      data: { orderId: p.orderId, url: `/#assign=${p.orderId || ""}` },
-    })
+    (async () => {
+      // If the app is open and visible, the in-app alert (same tag) already covers it: no double banner.
+      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      if (windows.some((c) => c.visibilityState === "visible") && orderId !== "TEST") return;
+      await self.registration.showNotification(NEW_ORDER_TITLE, {
+        body: NEW_ORDER_BODY,
+        icon: "/icon-192.png",
+        badge: "/icon-192.png",
+        dir: "rtl",
+        lang: "he",
+        vibrate: [200, 100, 200],
+        requireInteraction: true,
+        tag: `new-order-${orderId || "x"}`,
+        data: { orderId, url: orderId && orderId !== "TEST" ? `/#assign=${encodeURIComponent(orderId)}` : "/" },
+      });
+    })()
+  );
+});
+
+// The browser rotated/expired the subscription: ask any open app to register the new one.
+// (A closed app re-registers the next time the admin opens it.)
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(
+    (async () => {
+      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      windows.forEach((c) => c.postMessage({ type: "push-resubscribe" }));
+    })()
   );
 });
