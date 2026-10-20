@@ -59,6 +59,8 @@ import {
   TrendingUp,
   LogOut,
   Calculator,
+  QrCode,
+  Smartphone,
 } from "lucide-react";
 
 /* =========================================================================
@@ -1714,6 +1716,8 @@ function supabaseHostOf() {
 function isSafeMediaSrc(v, opts) {
   const o = opts || {};
   if (typeof v !== "string" || !v || v.length > 16000000) return false;
+  // Permanent private-storage reference ("evidence/<orderId>/…"): display only, resolved to a signed URL first.
+  if (o.allowRef && /^evidence\/[A-Za-z0-9._~%\/-]+$/.test(v) && !v.includes("..")) return true;
   if (v.startsWith("data:")) return SAFE_DATA_IMAGE.test(v) || (o.kind === "media" && SAFE_DATA_MEDIA.test(v));
   if (v.startsWith("blob:")) return !!o.allowBlob && /^blob:https?:\/\/[^\s"'<>]+$/i.test(v);
   let u;
@@ -2188,8 +2192,9 @@ function buildDeliveryCertificateHtml(order) {
 // Triggers a real browser download of the affidavit as a standalone .html
 // file the lawyer/admin can open, print or attach to a court filing —
 // a functional fallback since there's no server generating a signed PDF here.
-function downloadAffidavit(order, kind) {
-  const html = buildAffidavitHtml(order, kind);
+async function downloadAffidavit(order, kind) {
+  // Storage references become inline images first, so the file never depends on an expiring link.
+  const html = buildAffidavitHtml(await inlineOrderEvidence(order), kind);
   const blob = new window.Blob([html], { type: "text/html;charset=utf-8" });
   const url = window.URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -2925,6 +2930,641 @@ const ROLES = {
 // back to the Admin dashboard) stays available from every portal, including
 // Courier — this is a login simulator for trying out all three experiences,
 // not a real authenticated session, so nothing here is actually locked.
+// ---------------------------------------------------------------------------
+// QR Code generator — ISO/IEC 18004 (Model 2), byte mode, versions 1–10, ECC L/M/Q/H.
+// Pure JS (no dependency), works offline. qrEncode() returns the module matrix;
+// qrSvgString() / qrDrawToCanvas() turn it into a vector / raster picture.
+// ---------------------------------------------------------------------------
+const QR_ECC_FORMAT_BITS = { L: 1, M: 0, Q: 3, H: 2 };
+const QR_ECC_INDEX = { L: 0, M: 1, Q: 2, H: 3 };
+// Index = version (1..10); one table per ECC level in the order L, M, Q, H.
+const QR_ECC_CODEWORDS_PER_BLOCK = [
+  [-1, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18],
+  [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26],
+  [-1, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24],
+  [-1, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28],
+];
+const QR_NUM_ERROR_CORRECTION_BLOCKS = [
+  [-1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4],
+  [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5],
+  [-1, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8],
+  [-1, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8],
+];
+function qrRawDataModules(ver) {
+  let r = (16 * ver + 128) * ver + 64;
+  if (ver >= 2) {
+    const n = Math.floor(ver / 7) + 2;
+    r -= (25 * n - 10) * n - 55;
+    if (ver >= 7) r -= 36;
+  }
+  return r;
+}
+function qrDataCodewords(ver, ecc) {
+  const i = QR_ECC_INDEX[ecc];
+  return Math.floor(qrRawDataModules(ver) / 8) - QR_ECC_CODEWORDS_PER_BLOCK[i][ver] * QR_NUM_ERROR_CORRECTION_BLOCKS[i][ver];
+}
+function qrGfMul(x, y) {
+  let z = 0;
+  for (let i = 7; i >= 0; i -= 1) {
+    z = (z << 1) ^ ((z >>> 7) * 0x11d);
+    z ^= ((y >>> i) & 1) * x;
+  }
+  return z;
+}
+function qrRsDivisor(degree) {
+  const result = new Array(degree).fill(0);
+  result[degree - 1] = 1;
+  let root = 1;
+  for (let i = 0; i < degree; i += 1) {
+    for (let j = 0; j < degree; j += 1) {
+      result[j] = qrGfMul(result[j], root);
+      if (j + 1 < degree) result[j] ^= result[j + 1];
+    }
+    root = qrGfMul(root, 0x02);
+  }
+  return result;
+}
+function qrRsRemainder(data, divisor) {
+  const result = divisor.map(() => 0);
+  data.forEach((b) => {
+    const factor = b ^ result.shift();
+    result.push(0);
+    divisor.forEach((coef, i) => {
+      result[i] ^= qrGfMul(coef, factor);
+    });
+  });
+  return result;
+}
+function qrUtf8Bytes(text) {
+  const out = [];
+  const s = unescape(encodeURIComponent(String(text)));
+  for (let i = 0; i < s.length; i += 1) out.push(s.charCodeAt(i));
+  return out;
+}
+// Returns { version, mask, ecc, size, modules } — modules[y][x] === true is a dark module.
+// `forceMask` (0–7) exists for testing; normally the best mask is chosen automatically.
+function qrEncode(text, ecc = "Q", forceMask = -1) {
+  const bytes = qrUtf8Bytes(text);
+  let version = 0;
+  for (let v = 1; v <= 10; v += 1) {
+    const capBits = qrDataCodewords(v, ecc) * 8;
+    const need = 4 + (v <= 9 ? 8 : 16) + bytes.length * 8;
+    if (need <= capBits) {
+      version = v;
+      break;
+    }
+  }
+  if (!version) throw new Error("QR: text too long");
+  const size = version * 4 + 17;
+  // ---- data bits ----
+  const bits = [];
+  const put = (val, len) => {
+    for (let i = len - 1; i >= 0; i -= 1) bits.push((val >>> i) & 1);
+  };
+  put(0x4, 4);
+  put(bytes.length, version <= 9 ? 8 : 16);
+  bytes.forEach((b) => put(b, 8));
+  const capBits = qrDataCodewords(version, ecc) * 8;
+  put(0, Math.min(4, capBits - bits.length));
+  put(0, (8 - (bits.length % 8)) % 8);
+  for (let pad = 0xec; bits.length < capBits; pad ^= 0xec ^ 0x11) put(pad, 8);
+  const data = [];
+  for (let i = 0; i < bits.length; i += 8) {
+    let b = 0;
+    for (let j = 0; j < 8; j += 1) b = (b << 1) | bits[i + j];
+    data.push(b);
+  }
+  // ---- error correction + interleave ----
+  const ei = QR_ECC_INDEX[ecc];
+  const numBlocks = QR_NUM_ERROR_CORRECTION_BLOCKS[ei][version];
+  const blockEccLen = QR_ECC_CODEWORDS_PER_BLOCK[ei][version];
+  const rawCodewords = Math.floor(qrRawDataModules(version) / 8);
+  const numShortBlocks = numBlocks - (rawCodewords % numBlocks);
+  const shortBlockLen = Math.floor(rawCodewords / numBlocks);
+  const blocks = [];
+  const rsDiv = qrRsDivisor(blockEccLen);
+  for (let i = 0, k = 0; i < numBlocks; i += 1) {
+    const dat = data.slice(k, k + shortBlockLen - blockEccLen + (i < numShortBlocks ? 0 : 1));
+    k += dat.length;
+    const e = qrRsRemainder(dat, rsDiv);
+    if (i < numShortBlocks) dat.push(0);
+    blocks.push(dat.concat(e));
+  }
+  const all = [];
+  for (let i = 0; i < blocks[0].length; i += 1) {
+    blocks.forEach((block, j) => {
+      if (i !== shortBlockLen - blockEccLen || j >= numShortBlocks) all.push(block[i]);
+    });
+  }
+  // ---- matrix with function patterns ----
+  const modules = Array.from({ length: size }, () => new Array(size).fill(false));
+  const isFn = Array.from({ length: size }, () => new Array(size).fill(false));
+  const setFn = (x, y, dark) => {
+    modules[y][x] = dark;
+    isFn[y][x] = true;
+  };
+  for (let i = 0; i < size; i += 1) {
+    setFn(6, i, i % 2 === 0);
+    setFn(i, 6, i % 2 === 0);
+  }
+  const finder = (cx, cy) => {
+    for (let dy = -4; dy <= 4; dy += 1) {
+      for (let dx = -4; dx <= 4; dx += 1) {
+        const dist = Math.max(Math.abs(dx), Math.abs(dy));
+        const x = cx + dx;
+        const y = cy + dy;
+        if (x >= 0 && x < size && y >= 0 && y < size) setFn(x, y, dist !== 2 && dist !== 4);
+      }
+    }
+  };
+  finder(3, 3);
+  finder(size - 4, 3);
+  finder(3, size - 4);
+  const align = [];
+  if (version > 1) {
+    const n = Math.floor(version / 7) + 2;
+    const step = Math.floor((version * 8 + n * 3 + 5) / (n * 4 - 4)) * 2;
+    align.push(6);
+    for (let pos = size - 7; align.length < n; pos -= step) align.splice(1, 0, pos);
+  }
+  for (let i = 0; i < align.length; i += 1) {
+    for (let j = 0; j < align.length; j += 1) {
+      if ((i === 0 && j === 0) || (i === 0 && j === align.length - 1) || (i === align.length - 1 && j === 0)) continue;
+      for (let dy = -2; dy <= 2; dy += 1) {
+        for (let dx = -2; dx <= 2; dx += 1) setFn(align[i] + dx, align[j] + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+      }
+    }
+  }
+  const bit = (x, i) => ((x >>> i) & 1) !== 0;
+  const drawFormat = (mask) => {
+    const d = (QR_ECC_FORMAT_BITS[ecc] << 3) | mask;
+    let rem = d;
+    for (let i = 0; i < 10; i += 1) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+    const fb = ((d << 10) | rem) ^ 0x5412;
+    for (let i = 0; i <= 5; i += 1) setFn(8, i, bit(fb, i));
+    setFn(8, 7, bit(fb, 6));
+    setFn(8, 8, bit(fb, 7));
+    setFn(7, 8, bit(fb, 8));
+    for (let i = 9; i < 15; i += 1) setFn(14 - i, 8, bit(fb, i));
+    for (let i = 0; i < 8; i += 1) setFn(size - 1 - i, 8, bit(fb, i));
+    for (let i = 8; i < 15; i += 1) setFn(8, size - 15 + i, bit(fb, i));
+    setFn(8, size - 8, true);
+  };
+  drawFormat(0); // reserves the format area; rewritten once the mask is known
+  if (version >= 7) {
+    let rem = version;
+    for (let i = 0; i < 12; i += 1) rem = (rem << 1) ^ ((rem >>> 11) * 0x1f25);
+    const vb = (version << 12) | rem;
+    for (let i = 0; i < 18; i += 1) {
+      const a = size - 11 + (i % 3);
+      const b = Math.floor(i / 3);
+      setFn(a, b, bit(vb, i));
+      setFn(b, a, bit(vb, i));
+    }
+  }
+  // ---- codewords in zig-zag order ----
+  let bi = 0;
+  for (let right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let vert = 0; vert < size; vert += 1) {
+      for (let j = 0; j < 2; j += 1) {
+        const x = right - j;
+        const upward = ((right + 1) & 2) === 0;
+        const y = upward ? size - 1 - vert : vert;
+        if (!isFn[y][x] && bi < all.length * 8) {
+          modules[y][x] = bit(all[bi >>> 3], 7 - (bi & 7));
+          bi += 1;
+        }
+      }
+    }
+  }
+  // ---- masking ----
+  const applyMask = (m) => {
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
+        let inv;
+        switch (m) {
+          case 0: inv = (x + y) % 2 === 0; break;
+          case 1: inv = y % 2 === 0; break;
+          case 2: inv = x % 3 === 0; break;
+          case 3: inv = (x + y) % 3 === 0; break;
+          case 4: inv = (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0; break;
+          case 5: inv = ((x * y) % 2) + ((x * y) % 3) === 0; break;
+          case 6: inv = (((x * y) % 2) + ((x * y) % 3)) % 2 === 0; break;
+          default: inv = ((((x + y) % 2) + ((x * y) % 3)) % 2) === 0; break;
+        }
+        if (!isFn[y][x] && inv) modules[y][x] = !modules[y][x];
+      }
+    }
+  };
+  const penalty = () => {
+    let p = 0;
+    const runs = (get) => {
+      for (let a = 0; a < size; a += 1) {
+        let run = 1;
+        const hist = [];
+        for (let b = 1; b <= size; b += 1) {
+          if (b < size && get(a, b) === get(a, b - 1)) run += 1;
+          else {
+            if (run >= 5) p += 3 + (run - 5);
+            hist.push(run);
+            run = 1;
+          }
+        }
+        // finder-like 1:1:3:1:1 patterns
+        for (let k = 0; k + 4 < hist.length; k += 1) {
+          const n = hist[k + 1];
+          if (n > 0 && hist[k + 2] === n * 3 && hist[k + 3] === n && hist[k + 4] === n) p += 40;
+        }
+      }
+    };
+    runs((y, x) => modules[y][x]);
+    runs((x, y) => modules[y][x]);
+    for (let y = 0; y < size - 1; y += 1) {
+      for (let x = 0; x < size - 1; x += 1) {
+        const c = modules[y][x];
+        if (c === modules[y][x + 1] && c === modules[y + 1][x] && c === modules[y + 1][x + 1]) p += 3;
+      }
+    }
+    let dark = 0;
+    modules.forEach((row) => row.forEach((c) => { if (c) dark += 1; }));
+    p += Math.floor(Math.abs((dark * 20) - (size * size * 10)) / (size * size)) * 10;
+    return p;
+  };
+  let mask = forceMask;
+  if (mask < 0 || mask > 7) {
+    let best = Infinity;
+    for (let m = 0; m < 8; m += 1) {
+      applyMask(m);
+      drawFormat(m);
+      const pen = penalty();
+      if (pen < best) {
+        best = pen;
+        mask = m;
+      }
+      applyMask(m); // undo
+    }
+  }
+  applyMask(mask);
+  drawFormat(mask);
+  return { version, mask, ecc, size, modules };
+}
+// Standalone vector picture: white background, 4-module quiet zone, one merged path.
+function qrSvgString(qr, opts) {
+  const o = { quiet: 4, dark: "#000000", light: "#ffffff", ...(opts || {}) };
+  const n = qr.size + o.quiet * 2;
+  let d = "";
+  for (let y = 0; y < qr.size; y += 1) {
+    let x = 0;
+    while (x < qr.size) {
+      if (qr.modules[y][x]) {
+        let w = 1;
+        while (x + w < qr.size && qr.modules[y][x + w]) w += 1;
+        d += `M${x + o.quiet} ${y + o.quiet}h${w}v1h-${w}z`;
+        x += w;
+      } else x += 1;
+    }
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${n} ${n}" width="${n * 10}" height="${n * 10}" shape-rendering="crispEdges" role="img" aria-label="QR"><rect width="${n}" height="${n}" fill="${o.light}"/><path d="${d}" fill="${o.dark}"/></svg>`;
+}
+// Draws the matrix onto a square canvas with whole-pixel modules (crisp at print size).
+function qrDrawToCanvas(qr, canvas, px, caption) {
+  const quiet = 4;
+  const ctx = canvas.getContext("2d");
+  canvas.width = px;
+  canvas.height = px;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, px, px);
+  const captionH = caption ? Math.round(px * 0.09) : 0;
+  const mod = Math.max(1, Math.floor((px - captionH) / (qr.size + quiet * 2)));
+  const side = mod * (qr.size + quiet * 2);
+  const left = Math.floor((px - side) / 2);
+  const top = Math.floor((px - captionH - side) / 2);
+  ctx.fillStyle = "#000000";
+  for (let y = 0; y < qr.size; y += 1) {
+    for (let x = 0; x < qr.size; x += 1) {
+      if (qr.modules[y][x]) ctx.fillRect(left + (x + quiet) * mod, top + (y + quiet) * mod, mod, mod);
+    }
+  }
+  if (caption) {
+    ctx.fillStyle = "#111111";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `700 ${Math.round(captionH * 0.6)}px Heebo, Arial, sans-serif`;
+    ctx.fillText(caption, px / 2, px - captionH / 2 - Math.round(px * 0.01));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mobile-app installer (PWA) + marketing source tracking
+// ---------------------------------------------------------------------------
+const SITE_URL_MAIN = "https://mesirot.express";
+const SRC_STORE_KEY = "mx_src";
+const SRC_MAX_AGE_MS = 90 * 24 * 3600 * 1000;
+function sanitizeSource(v) {
+  const t = String(v || "").trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9_-]{0,23}$/.test(t) ? t : "";
+}
+// ?src=tiktok|facebook|card… : remembered for 90 days (first touch wins until it expires).
+function captureSignupSource() {
+  try {
+    const src = sanitizeSource(new window.URLSearchParams(window.location.search).get("src"));
+    if (!src) return;
+    let keep = false;
+    try {
+      const old = JSON.parse(window.localStorage.getItem(SRC_STORE_KEY) || "null");
+      keep = !!(old && sanitizeSource(old.src) && window.Date.now() - Number(old.t) < SRC_MAX_AGE_MS);
+    } catch (e) {
+      keep = false;
+    }
+    if (!keep) window.localStorage.setItem(SRC_STORE_KEY, JSON.stringify({ src, t: window.Date.now() }));
+    window.sessionStorage.setItem(SRC_STORE_KEY, src);
+  } catch (e) {
+    /* storage blocked: attribution is simply skipped */
+  }
+}
+function readSignupSource() {
+  try {
+    const old = JSON.parse(window.localStorage.getItem(SRC_STORE_KEY) || "null");
+    if (old && sanitizeSource(old.src) && window.Date.now() - Number(old.t) < SRC_MAX_AGE_MS) return sanitizeSource(old.src);
+  } catch (e) {
+    /* ignore */
+  }
+  try {
+    return sanitizeSource(window.sessionStorage.getItem(SRC_STORE_KEY));
+  } catch (e) {
+    return "";
+  }
+}
+captureSignupSource();
+const SOURCE_LABELS = { tiktok: "טיקטוק", facebook: "פייסבוק", card: "כרטיס ביקור", whatsapp: "וואטסאפ", instagram: "אינסטגרם" };
+const sourceLabel = (k) => (k ? SOURCE_LABELS[k] || k : "");
+
+// The browser may fire beforeinstallprompt before any component exists, so it is caught here.
+let deferredInstallPrompt = null;
+const installListeners = new window.Set();
+const notifyInstall = () => installListeners.forEach((f) => f());
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  notifyInstall();
+});
+window.addEventListener("appinstalled", () => {
+  deferredInstallPrompt = null;
+  notifyInstall();
+});
+// Installability on Android needs a registered service worker (the same /sw.js the notifications use; it has no fetch handler).
+window.addEventListener("load", () => {
+  try {
+    if ("serviceWorker" in window.navigator) window.navigator.serviceWorker.register("/sw.js").catch(() => {});
+  } catch (e) {
+    /* ignore */
+  }
+});
+function isStandaloneApp() {
+  try {
+    return !!((window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone);
+  } catch (e) {
+    return false;
+  }
+}
+function isIosDevice() {
+  const ua = window.navigator.userAgent || "";
+  return /iphone|ipad|ipod/i.test(ua) || (window.navigator.platform === "MacIntel" && window.navigator.maxTouchPoints > 1);
+}
+function InstallGuideModal({ open, onClose }) {
+  const ios = isIosDevice();
+  return (
+    <Modal open={open} onClose={onClose} title="📲 התקנת האפליקציה בנייד">
+      {ios ? (
+        <ol className="space-y-3 text-sm text-slate-700">
+          <li className="flex items-start gap-3 rounded-2xl bg-slate-50 p-3">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">1</span>
+            <span>
+              לחצו על כפתור השיתוף <strong>Share</strong> <span className="text-lg">⬆️</span> בתחתית המסך (ב-Safari).
+            </span>
+          </li>
+          <li className="flex items-start gap-3 rounded-2xl bg-slate-50 p-3">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">2</span>
+            <span>
+              בחרו <strong>"הוסף למסך הבית"</strong> (<span dir="ltr">Add to Home Screen</span>) <span className="text-lg">➕</span> ולחצו על <strong>הוסף</strong>.
+            </span>
+          </li>
+          <li className="text-[12px] text-slate-400">האפליקציה תופיע כאייקון במסך הבית. בדפדפנים אחרים באייפון יש לפתוח את האתר ב-Safari.</li>
+        </ol>
+      ) : (
+        <ol className="space-y-3 text-sm text-slate-700">
+          <li className="flex items-start gap-3 rounded-2xl bg-slate-50 p-3">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">1</span>
+            <span>פתחו את תפריט הדפדפן (⋮ או ⋯) בפינה העליונה.</span>
+          </li>
+          <li className="flex items-start gap-3 rounded-2xl bg-slate-50 p-3">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">2</span>
+            <span>
+              בחרו <strong>"התקן אפליקציה"</strong> או <strong>"הוסף למסך הבית"</strong> (<span dir="ltr">Install app / Add to Home screen</span>) ➕ ואשרו.
+            </span>
+          </li>
+        </ol>
+      )}
+      <button type="button" onClick={onClose} className="mt-4 w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700">
+        הבנתי
+      </button>
+    </Modal>
+  );
+}
+function InstallAppButton({ compact = false, className = "" }) {
+  const [, setTick] = useState(0);
+  const [guide, setGuide] = useState(false);
+  useEffect(() => {
+    const f = () => setTick((n) => n + 1);
+    installListeners.add(f);
+    return () => installListeners.delete(f);
+  }, []);
+  if (isStandaloneApp()) return null;
+  const onClick = async () => {
+    const ev = deferredInstallPrompt;
+    if (ev && typeof ev.prompt === "function") {
+      try {
+        ev.prompt();
+        await ev.userChoice;
+      } catch (e) {
+        /* fall through to the guide below */
+        setGuide(true);
+      }
+      deferredInstallPrompt = null; // a prompt can be used once
+      notifyInstall();
+      return;
+    }
+    setGuide(true);
+  };
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onClick}
+        title="התקן אפליקציה לנייד"
+        className={`flex items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs font-bold text-white hover:bg-indigo-700 ${className}`}
+      >
+        {compact ? (
+          <>
+            <Smartphone className="h-3.5 w-3.5 sm:hidden" />
+            <span className="hidden sm:inline">📲 התקן אפליקציה לנייד</span>
+            <span className="sr-only sm:hidden">התקן אפליקציה לנייד</span>
+          </>
+        ) : (
+          <span>📲 התקן אפליקציה לנייד</span>
+        )}
+      </button>
+      <InstallGuideModal open={guide} onClose={() => setGuide(false)} />
+    </>
+  );
+}
+
+// ---- Admin: QR for the business card + campaign links ----
+function downloadBlobFile(blob, name) {
+  const url = window.URL.createObjectURL(blob);
+  const a = window.document.createElement("a");
+  a.href = url;
+  a.download = name;
+  window.document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => window.URL.revokeObjectURL(url), 2000);
+}
+const WHATSAPP_TEXT = `שלום! מצאתי שירות מסירות משפטיות מהיר ומאובטח — מסירה עם תיעוד, מעקב ותצהיר מוסר דיגיטלי: ${SITE_URL_MAIN}/?src=whatsapp`;
+const MARKETING_LINKS = [
+  { key: "main", label: "קישור ראשי (כרטיס ביקור / ביו)", url: SITE_URL_MAIN },
+  { key: "tiktok", label: "טיקטוק", url: `${SITE_URL_MAIN}/?src=tiktok` },
+  { key: "facebook", label: "פייסבוק", url: `${SITE_URL_MAIN}/?src=facebook` },
+  { key: "whatsapp", label: "שיתוף בוואטסאפ (עם טקסט מוכן)", url: `https://wa.me/?text=${encodeURIComponent(WHATSAPP_TEXT)}` },
+];
+function MarketingHubModal({ open, onClose }) {
+  const [toast, copy] = useCopyToast();
+  const [caption, setCaption] = useState(false);
+  const qr = useMemo(() => qrEncode(SITE_URL_MAIN, "Q"), []);
+  const svg = useMemo(() => qrSvgString(qr, { quiet: 4 }), [qr]);
+  const downloadPng = () => {
+    const canvas = window.document.createElement("canvas");
+    qrDrawToCanvas(qr, canvas, 1200, caption ? "mesirot.express" : "");
+    canvas.toBlob((blob) => {
+      if (blob) downloadBlobFile(blob, "mesirot-express-qr-1200.png");
+    }, "image/png");
+  };
+  const downloadSvg = () => downloadBlobFile(new window.Blob([svg], { type: "image/svg+xml" }), "mesirot-express-qr.svg");
+  return (
+    <Modal open={open} onClose={onClose} title="📇 קוד QR לכרטיס ביקור וקישורי פרסום" wide>
+      <div className="space-y-5">
+        <div className="rounded-2xl border border-slate-200/60 bg-slate-50 p-4 text-center">
+          <div
+            dir="ltr"
+            className="mx-auto w-full max-w-[240px] rounded-xl bg-white p-1 ring-1 ring-slate-200 [&>svg]:h-auto [&>svg]:w-full"
+            dangerouslySetInnerHTML={{ __html: svg }}
+          />
+          <p dir="ltr" className="mt-2 text-xs font-semibold text-slate-600">{SITE_URL_MAIN}</p>
+          <p className="text-[11px] text-slate-400">QR תקני (ISO/IEC 18004) · גרסה {qr.version} · תיקון שגיאות Q · שוליים לבנים 4 מודולים · נוצר מקומית, ללא שירות חיצוני</p>
+          <label className="mt-3 inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-600">
+            <input type="checkbox" checked={caption} onChange={(e) => setCaption(e.target.checked)} />
+            הוסף כיתוב mesirot.express מתחת ל-QR (ב-PNG)
+          </label>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            <button type="button" onClick={downloadPng} className="rounded-xl bg-indigo-600 px-3 py-2.5 text-sm font-bold text-white hover:bg-indigo-700">
+              📥 הורד קוד QR לדפוס (PNG 1200x1200)
+            </button>
+            <button type="button" onClick={downloadSvg} className="rounded-xl border border-indigo-200 bg-white px-3 py-2.5 text-sm font-bold text-indigo-700 hover:bg-indigo-50">
+              📥 הורד קוד QR וקטורי לבית דפוס (SVG)
+            </button>
+          </div>
+        </div>
+        <div className="space-y-2">
+          <p className="text-sm font-bold text-slate-700">קישורי פרסום ומעקב</p>
+          {MARKETING_LINKS.map((l) => (
+            <div key={l.key} className="rounded-2xl border border-slate-200/60 bg-white p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-slate-600">{l.label}</p>
+                <button
+                  type="button"
+                  onClick={() => copy(l.url, "הקישור הועתק ✓")}
+                  className="shrink-0 rounded-lg bg-amber-500 px-3 py-1 text-xs font-bold text-white hover:bg-amber-600"
+                >
+                  📋 העתק
+                </button>
+              </div>
+              <p dir="ltr" className="mt-1 select-all break-all text-left text-[11px] text-slate-500">{l.url}</p>
+            </div>
+          ))}
+          <p className="text-[11px] leading-relaxed text-slate-400">
+            לקוח שנכנס דרך קישור עם <span dir="ltr">?src=…</span> נרשם עם מקור ההגעה, והוא מופיע בלשונית "שיווק" ובטבלת הלקוחות לאחר ההזמנה הראשונה. המקור מסתמך על הקישור שבו הלקוח השתמש ולכן הוא אינדיקציה בלבד.
+          </p>
+        </div>
+      </div>
+      <CopyToast toast={toast} />
+    </Modal>
+  );
+}
+// Which channel brought each client: taken from the first order that carries a signupSource.
+function clientSourceMap(orders) {
+  const m = {};
+  (orders || []).forEach((o) => {
+    const id = o.lawyerId || o.submittedBy;
+    if (id && o.signupSource && !m[id]) m[id] = o.signupSource;
+  });
+  return m;
+}
+function MarketingTab({ lawyers, orders }) {
+  const [open, setOpen] = useState(false);
+  const bySrc = useMemo(() => {
+    const m = clientSourceMap(orders);
+    const rows = {};
+    (lawyers || []).forEach((l) => {
+      const k = m[l.id] || m[l.name];
+      if (!k) return;
+      rows[k] = rows[k] || { src: k, clients: 0, orders: 0 };
+      rows[k].clients += 1;
+      rows[k].orders += (orders || []).filter((o) => o.lawyerId === l.id || (!o.lawyerId && o.submittedBy === l.name)).length;
+    });
+    return Object.values(rows).sort((a, b) => b.clients - a.clients);
+  }, [lawyers, orders]);
+  return (
+    <div className="space-y-4">
+      <div className="rounded-3xl border border-slate-200/60 bg-white p-5">
+        <h3 className="text-base font-bold text-indigo-700">שיווק והפצה</h3>
+        <p className="mt-1 text-xs text-slate-500">קוד QR לכרטיס ביקור, קישורי פרסום לרשתות חברתיות ומעקב אחר מקור ההגעה של לקוחות חדשים.</p>
+        <button type="button" onClick={() => setOpen(true)} className="mt-3 flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700">
+          <QrCode className="h-4 w-4" /> 📇 קוד QR לכרטיס ביקור וקישורי פרסום
+        </button>
+      </div>
+      <div className="overflow-x-auto rounded-2xl border border-slate-200/60 bg-white">
+        <table className="w-full min-w-[420px] text-sm">
+          <thead>
+            <tr className="bg-slate-50 text-right text-xs text-slate-400">
+              <th className="px-3 py-2 font-medium">מקור הגעה</th>
+              <th className="px-3 py-2 font-medium">לקוחות</th>
+              <th className="px-3 py-2 font-medium">הזמנות</th>
+            </tr>
+          </thead>
+          <tbody>
+            {bySrc.map((r) => (
+              <tr key={r.src} className="border-t border-slate-100">
+                <td className="px-3 py-2.5 font-medium text-slate-700">{sourceLabel(r.src)} <span dir="ltr" className="text-[11px] text-slate-400">({r.src})</span></td>
+                <td className="px-3 py-2.5 text-slate-600">{r.clients}</td>
+                <td className="px-3 py-2.5 text-slate-600">{r.orders}</td>
+              </tr>
+            ))}
+            {bySrc.length === 0 && (
+              <tr>
+                <td colSpan={3} className="py-8 text-center text-sm text-slate-400">
+                  עדיין אין לקוחות עם מקור הגעה. המקור מופיע לאחר ההזמנה הראשונה של לקוח שנכנס דרך קישור עם ?src=
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <MarketingHubModal open={open} onClose={() => setOpen(false)} />
+    </div>
+  );
+}
+
 function TopNav({ view, setView }) {
   const session = React.useContext(SessionContext);
   const signedIn = !!(session && session.profile);
@@ -2967,6 +3607,7 @@ function TopNav({ view, setView }) {
               );
             })}
           </nav>
+          <InstallAppButton compact />
           {signedIn && (
             <button
               type="button"
@@ -4114,17 +4755,19 @@ function NewOrderForm({ onCreate }) {
 // in a new tab by most browsers, so the lightbox is inline).
 function EvidencePhoto({ photo, label = "צילום" }) {
   const [open, setOpen] = useState(false);
+  const shown = useEvidenceSrc(photo && photo.dataUrl);
   if (!photo || !photo.dataUrl) return null;
-  if (!isSafeMediaSrc(photo.dataUrl, { kind: "media", allowBlob: true })) {
+  if (!isSafeMediaSrc(photo.dataUrl, { kind: "media", allowBlob: true, allowRef: true }) || shown === null) {
     return <p className="mt-2 text-[11px] text-slate-400">{label}: המדיה אינה זמינה או לא אומתה</p>;
   }
+  if (shown === undefined) return <p className="mt-2 text-[11px] text-slate-400">{label}: טוען…</p>;
   return (
     <div className="mt-2">
       <p className="mb-1 text-[11px] font-semibold text-slate-500">{label}</p>
       <button type="button" onClick={() => setOpen((v) => !v)} className="block text-right" title="לחצו להגדלה / צמצום">
         {photo.kind === "video" ? (
           <video
-            src={photo.dataUrl}
+            src={shown}
             controls={open}
             muted
             playsInline
@@ -4134,7 +4777,7 @@ function EvidencePhoto({ photo, label = "צילום" }) {
           />
         ) : (
           <img
-            src={photo.dataUrl}
+            src={shown}
             alt="תיעוד צילום"
             className={`rounded-lg border border-slate-200/60 object-cover transition-all ${
               open ? "max-h-96 w-full object-contain bg-slate-50" : "h-20 w-20"
@@ -4172,6 +4815,8 @@ function photoLabelFor(type) {
 
 function AttemptEvidence({ attempt: a, courier }) {
   const mapUrl = mapUrlFor(a);
+  const audioShown = useEvidenceSrc(a.audio);
+  const sigShown = useEvidenceSrc(a.signatureDataUrl);
   return (
     <li className="rounded-lg border border-slate-100 bg-white p-3 text-sm">
       <div className="flex items-center justify-between">
@@ -4209,18 +4854,18 @@ function AttemptEvidence({ attempt: a, courier }) {
         </p>
       )}
       <EvidencePhoto photo={a.photo} label={photoLabelFor(a.type)} />
-      {a.audio && isSafeMediaSrc(a.audio, { kind: "media", allowBlob: true }) && (
-        <audio controls src={a.audio} className="mt-2 h-8 w-full">
+      {a.audio && isSafeMediaSrc(a.audio, { kind: "media", allowBlob: true, allowRef: true }) && audioShown && (
+        <audio controls src={audioShown} className="mt-2 h-8 w-full">
           <track kind="captions" />
         </audio>
       )}
-      {!(a.audio && isSafeMediaSrc(a.audio, { kind: "media", allowBlob: true })) && (a.audioRecorded || a.audioSaveFailed) && (
+      {!(a.audio && isSafeMediaSrc(a.audio, { kind: "media", allowBlob: true, allowRef: true })) && (a.audioRecorded || a.audioSaveFailed) && (
         <p className="mt-1 text-[11px] font-medium text-amber-700">🎙️ בוצעה הקלטה — הקובץ אינו שמור בשרת</p>
       )}
-      {a.signatureDataUrl && isSafeMediaSrc(a.signatureDataUrl, { allowBlob: true }) && (
+      {a.signatureDataUrl && isSafeMediaSrc(a.signatureDataUrl, { allowBlob: true, allowRef: true }) && sigShown && (
         <div className="mt-2">
           <p className="text-[11px] text-slate-400">חתימת הנמען</p>
-          <img src={a.signatureDataUrl} alt="חתימת הנמען" className="h-14 rounded border border-slate-200/60 bg-white p-1" />
+          <img src={sigShown} alt="חתימת הנמען" className="h-14 rounded border border-slate-200/60 bg-white p-1" />
         </div>
       )}
     </li>
@@ -4300,6 +4945,7 @@ function CustodyTimeline({ order }) {
 }
 
 function OrderDetailsModal({ order, onClose, onOpenAffidavit, onCancel, showPrice = true }) {
+  const affSigShown = useEvidenceSrc(order && order.affidavit && order.affidavit.signature);
   if (!order) return null;
   return (
     <Modal open={!!order} onClose={onClose} title={`תיק ביקורת מסירה — ${formatOrderNum(order.id)}`} wide>
@@ -4385,7 +5031,7 @@ function OrderDetailsModal({ order, onClose, onOpenAffidavit, onCancel, showPric
           {isAffidavitSigned(order) ? (
             <div className="space-y-2">
               <img
-                src={isSafeMediaSrc(order.affidavit.signature, { allowBlob: true }) ? order.affidavit.signature : undefined}
+                src={isSafeMediaSrc(order.affidavit.signature, { allowBlob: true, allowRef: true }) ? affSigShown || undefined : undefined}
                 alt="חתימת השליח"
                 className="h-20 max-w-full rounded border border-slate-200/60 bg-white object-contain p-1"
               />
@@ -4439,8 +5085,9 @@ function InfoRow({ label, value, action }) {
 // anywhere in this component or the data it's handed.
 // One thumbnail that opens full size in a new tab, with a download link.
 function EvidenceThumb({ src, label, name }) {
+  const shown = useEvidenceSrc(src && src !== "SIGNED" ? src : undefined);
   if (!src || src === "SIGNED") return null;
-  if (!isSafeMediaSrc(src, { allowBlob: true })) {
+  if (!isSafeMediaSrc(src, { allowBlob: true, allowRef: true }) || shown === null || shown === undefined) {
     return (
       <figure className="w-24 text-center">
         <div className="flex h-24 w-24 items-center justify-center rounded-lg border border-dashed border-slate-300 text-[10px] text-slate-400">לא זמין</div>
@@ -4450,11 +5097,11 @@ function EvidenceThumb({ src, label, name }) {
   }
   return (
     <figure className="w-24 text-center">
-      <a href={src} target="_blank" rel="noopener noreferrer" title="לחצו לצפייה בגודל מלא">
-        <img src={src} alt={label} className="h-24 w-24 rounded-lg border border-slate-200 bg-white object-cover" />
+      <a href={shown} target="_blank" rel="noopener noreferrer" title="לחצו לצפייה בגודל מלא">
+        <img src={shown} alt={label} className="h-24 w-24 rounded-lg border border-slate-200 bg-white object-cover" />
       </a>
       <figcaption className="mt-1 text-[11px] leading-tight text-slate-500">{label}</figcaption>
-      <a href={src} download={name} className="text-[11px] font-semibold text-indigo-600 hover:underline">
+      <a href={shown} download={name} className="text-[11px] font-semibold text-indigo-600 hover:underline">
         הורדה
       </a>
     </figure>
@@ -7377,6 +8024,22 @@ function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
   // Municipal 3-visit orders get BOTH documents: the legal affidavit (default) and the certificate.
   const [docKind, setDocKind] = useState("affidavit");
   const frameRef = useRef(null);
+  // The document is built from a copy whose storage references are inline images
+  // (self-contained for print / download); the saved order is never changed.
+  const [docOrderState, setDocOrderState] = useState(null);
+  useEffect(() => {
+    let live = true;
+    setDocOrderState(null);
+    if (order) {
+      inlineOrderEvidence(order).then((o) => {
+        if (live) setDocOrderState(o);
+      });
+    }
+    return () => {
+      live = false;
+    };
+  }, [order]);
+  const docOrder = docOrderState && order && docOrderState.id === order.id ? docOrderState : order;
 
   // The modal component stays mounted between orders, so start clean each time.
   useEffect(() => {
@@ -7402,6 +8065,8 @@ function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
     [order, vStampMode, vLicense]
   );
 
+  const vSigShown = useEvidenceSrc(vSig);
+  const stampShown = useEvidenceSrc(vStampMode === "auto" ? autoStamp : vStamp);
   if (!order) return null;
   const signed = isAffidavitSigned(order);
   const canEdit = !!onSign;
@@ -7466,7 +8131,7 @@ function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
       const win = window.open("", "_blank");
       if (win && win.document) {
         win.document.open();
-        win.document.write(buildAffidavitHtml(order, docKind));
+        win.document.write(buildAffidavitHtml(docOrder, docKind));
         win.document.close();
         setTimeout(() => {
           try {
@@ -7513,7 +8178,7 @@ function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
       <iframe
         ref={frameRef}
         title={`תצהיר מוסר ${formatOrderNum(order.id)}`}
-        srcDoc={buildAffidavitHtml(order, docKind)}
+        srcDoc={buildAffidavitHtml(docOrder, docKind)}
         sandbox="allow-same-origin allow-modals allow-popups allow-popups-to-escape-sandbox"
         className="h-[60vh] w-full rounded-lg border border-slate-200/60 bg-white"
       />
@@ -7559,7 +8224,7 @@ function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
                   onClick={() => setVSigning(true)}
                   className="flex h-20 w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-indigo-300 bg-white text-indigo-600 hover:bg-indigo-50"
                 >
-                  {vSig ? <img src={isSafeMediaSrc(vSig) ? vSig : undefined} alt="חתימת עורך הדין" className="h-16 object-contain" /> : (<><PenTool className="h-5 w-5" /> חתמו כאן</>)}
+                  {vSig ? <img src={isSafeMediaSrc(vSig, { allowRef: true }) ? vSigShown || undefined : undefined} alt="חתימת עורך הדין" className="h-16 object-contain" /> : (<><PenTool className="h-5 w-5" /> חתמו כאן</>)}
                 </button>
               </div>
               <div>
@@ -7582,7 +8247,7 @@ function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
                   <input type="file" accept="image/*" onChange={handleStampUpload} className="mb-2 block w-full text-xs text-slate-600" />
                 )}
                 {finalStamp ? (
-                  <img src={isSafeMediaSrc(finalStamp) ? finalStamp : undefined} alt="חותמת" className="h-16 rounded border border-slate-200 bg-white object-contain p-1" />
+                  <img src={isSafeMediaSrc(finalStamp, { allowRef: true }) ? stampShown || undefined : undefined} alt="חותמת" className="h-16 rounded border border-slate-200 bg-white object-contain p-1" />
                 ) : (
                   <p className="text-[11px] text-slate-400">{vStampMode === "upload" ? "בחרו תמונת חותמת" : "החותמת תיווצר לאחר הזנת מספר רישיון"}</p>
                 )}
@@ -7638,7 +8303,7 @@ function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
             </button>
             <button
               type="button"
-              onClick={() => downloadAffidavit(order, docKind)}
+              onClick={() => downloadAffidavit(docOrder, docKind)}
               className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100"
             >
               <Download className="h-4 w-4" /> הורדת קובץ
@@ -8565,6 +9230,7 @@ function LawyerDirectory({ lawyers, orders, onSetBlocked }) {
     return m;
   }, [lawyers, orders]);
   const countFor = (l) => orders.filter((o) => o.lawyerId === l.id || (!o.lawyerId && o.submittedBy === l.name)).length;
+  const sourceByClient = useMemo(() => clientSourceMap(orders), [orders]);
   return (
     <div className="space-y-3">
       <div>
@@ -8579,6 +9245,7 @@ function LawyerDirectory({ lawyers, orders, onSetBlocked }) {
               <th className="px-3 py-2 font-medium">אימייל</th>
               <th className="px-3 py-2 font-medium">הזמנות</th>
               <th className="px-3 py-2 font-medium">הצטרף דרך</th>
+              <th className="px-3 py-2 font-medium">מקור הגעה</th>
               <th className="px-3 py-2 font-medium">סטטוס</th>
             </tr>
           </thead>
@@ -8594,6 +9261,13 @@ function LawyerDirectory({ lawyers, orders, onSetBlocked }) {
                       🔗 הצטרף דרך: {referralByClient[l.id].referrer ? referralByClient[l.id].referrer.name : "ממליץ לא מזוהה"} (קוד: {referralByClient[l.id].code})
                       {referralByClient[l.id].fraudFlag ? " ⚠️" : ""}
                     </span>
+                  ) : (
+                    <span className="text-slate-300" title="מופיע לאחר ההזמנה הראשונה של הלקוח">—</span>
+                  )}
+                </td>
+                <td className="px-3 py-2.5 text-xs">
+                  {sourceByClient[l.id] || sourceByClient[l.name] ? (
+                    <span className={`${PILL} bg-indigo-50 text-indigo-700 ring-indigo-200`}>{sourceLabel(sourceByClient[l.id] || sourceByClient[l.name])}</span>
                   ) : (
                     <span className="text-slate-300" title="מופיע לאחר ההזמנה הראשונה של הלקוח">—</span>
                   )}
@@ -8628,7 +9302,7 @@ function LawyerDirectory({ lawyers, orders, onSetBlocked }) {
             ))}
             {lawyers.length === 0 && (
               <tr>
-                <td colSpan={5} className="py-8 text-center text-sm text-slate-400">
+                <td colSpan={6} className="py-8 text-center text-sm text-slate-400">
                   אין עדיין עורכי דין או לקוחות רשומים
                 </td>
               </tr>
@@ -8973,6 +9647,7 @@ function AdminDashboard({
       badge: (couriers || []).filter((c) => c.approvalStatus === "pending").length,
     },
     { key: "requests", label: "בקשות תמחור", icon: Coins, badge: pendingRequestsCount },
+    { key: "marketing", label: "שיווק", icon: QrCode },
     { key: "profile", label: "פרופיל", icon: User },
   ];
 
@@ -9016,6 +9691,8 @@ function AdminDashboard({
           <ArrowRight className="h-4 w-4" /> חזרה לסקירה
         </button>
       )}
+
+      {dashTab === "marketing" && <MarketingTab lawyers={lawyers || []} orders={orders} />}
 
       {dashTab === "profile" && (
         <ProfileTab role="admin" onSwitchRole={onSwitchRole} />
@@ -9785,6 +10462,150 @@ function orderHasUnsentMedia(o) {
   );
 }
 
+// ---- Private-storage support (works whether the bucket is public or private) ----
+// What is SAVED in orders / visits is always the permanent reference: the public-style
+// URL of the object (…/storage/v1/object/public/evidence/<path>) or an inline data: image.
+// For display, printing and affidavits it is turned — in memory only — into a short-lived
+// signed URL. If signing is impossible (demo mode, offline, no permission) the original
+// value is used, so legacy public URLs and data: images keep working exactly as before.
+const SIGNED_URL_SECONDS = 3600;
+const signedUrlCache = new window.Map(); // path -> { url, exp }
+const signedUrlPending = new window.Map();
+const inlineDataCache = new window.Map(); // evidence ref -> data: URL (for documents)
+function evidencePathOf(v) {
+  if (typeof v !== "string" || !v) return null;
+  let p = null;
+  if (/^evidence\/[^?#\s"'<>\\]+$/.test(v)) p = v.slice(9);
+  else if (/^https:\/\//i.test(v)) {
+    try {
+      const u = new window.URL(v);
+      const host = supabaseHostOf();
+      if (host && u.host === host) {
+        const m = /^\/storage\/v1\/object\/(?:public|sign|authenticated)\/evidence\/(.+)$/.exec(u.pathname);
+        if (m) p = m[1];
+      }
+    } catch (e) {
+      return null;
+    }
+  }
+  if (!p) return null;
+  try {
+    p = decodeURIComponent(p);
+  } catch (e) {
+    return null;
+  }
+  return p && !p.includes("..") && !p.startsWith("/") && p.length < 400 ? p : null;
+}
+async function resolveEvidenceUrl(v) {
+  const path = evidencePathOf(v);
+  if (!path || !supabase) return v;
+  const hit = signedUrlCache.get(path);
+  if (hit && hit.exp > window.Date.now()) return hit.url;
+  if (!signedUrlPending.has(path)) {
+    signedUrlPending.set(
+      path,
+      (async () => {
+        try {
+          const { data, error } = await supabase.storage.from(EVIDENCE_BUCKET).createSignedUrl(path, SIGNED_URL_SECONDS);
+          if (error || !data || !data.signedUrl) throw error || new Error("no signed url");
+          signedUrlCache.set(path, { url: data.signedUrl, exp: window.Date.now() + (SIGNED_URL_SECONDS - 300) * 1000 });
+          return data.signedUrl;
+        } catch (e) {
+          return null; // not signable (public bucket + no policy, offline…) → the original value is used
+        } finally {
+          signedUrlPending.delete(path);
+        }
+      })()
+    );
+  }
+  const url = await signedUrlPending.get(path);
+  return url || v;
+}
+// What can be shown right now: a plain value, a cached signed URL, null (unusable) or
+// undefined (a signed URL is still being requested).
+function evidenceDisplayNow(src) {
+  const path = evidencePathOf(src);
+  if (!path) return src;
+  if (!supabase) return /^https:/.test(src) ? src : null;
+  const c = signedUrlCache.get(path);
+  return c && c.exp > window.Date.now() ? c.url : undefined;
+}
+// React hook: the value to put in <img>/<audio>/<video> src. Never written back to any order.
+function useEvidenceSrc(src) {
+  const now = evidenceDisplayNow(src);
+  const [resolved, setResolved] = useState({ src: null, url: null });
+  useEffect(() => {
+    if (now !== undefined) return undefined;
+    let live = true;
+    resolveEvidenceUrl(src).then((u) => {
+      if (live) setResolved({ src, url: /^(https?:|data:|blob:)/.test(u || "") ? u : null });
+    });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src, now === undefined]);
+  return now !== undefined ? now : resolved.src === src ? resolved.url : undefined;
+}
+// A storage reference -> inline image (so printed / downloaded documents are self-contained
+// and never carry an expiring link). Anything it cannot convert is returned unchanged.
+async function inlineEvidenceValue(v) {
+  if (!supabase || !evidencePathOf(v)) return v;
+  if (inlineDataCache.has(v)) return inlineDataCache.get(v);
+  try {
+    const url = await resolveEvidenceUrl(v);
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(String(res.status));
+    const blob = await res.blob();
+    if (!/^image\/(png|jpe?g|webp|gif)$/i.test(blob.type) || blob.size > 8000000) return v;
+    const dataUrl = await new Promise((resolve, reject) => {
+      const r = new window.FileReader();
+      r.onload = () => resolve(String(r.result));
+      r.onerror = reject;
+      r.readAsDataURL(blob);
+    });
+    if (inlineDataCache.size > 40) inlineDataCache.delete(inlineDataCache.keys().next().value);
+    inlineDataCache.set(v, dataUrl);
+    return dataUrl;
+  } catch (e) {
+    return v;
+  }
+}
+// Copy of an order whose photos / signatures / stamps are inline images (documents only; never saved).
+async function inlineOrderEvidence(order) {
+  if (!order || !supabase) return order;
+  const attempts = order.attempts || [];
+  const topKeys = ["signature", "lawyerSignature", "lawyerStamp"];
+  const needs =
+    attempts.some((a) => evidencePathOf(a.photo && a.photo.dataUrl) || evidencePathOf(a.signatureDataUrl)) ||
+    topKeys.some((k) => evidencePathOf(order[k])) ||
+    evidencePathOf(order.affidavit && order.affidavit.signature);
+  if (!needs) return order;
+  const conv = (v) => (typeof v === "string" ? inlineEvidenceValue(v) : v);
+  const next = { ...order };
+  next.attempts = await Promise.all(
+    attempts.map(async (a) => ({
+      ...a,
+      photo: a.photo && a.photo.dataUrl && a.photo.kind !== "video" ? { ...a.photo, dataUrl: await conv(a.photo.dataUrl) } : a.photo,
+      signatureDataUrl: a.signatureDataUrl ? await conv(a.signatureDataUrl) : a.signatureDataUrl,
+    }))
+  );
+  for (const k of topKeys) if (typeof order[k] === "string") next[k] = await conv(order[k]);
+  if (order.affidavit && order.affidavit.signature) next.affidavit = { ...order.affidavit, signature: await conv(order.affidavit.signature) };
+  return next;
+}
+// Last line of defence before saving: no temporary signed URL may ever reach the database.
+function deepStripSigned(v, depth = 0) {
+  if (typeof v === "string") return /^https:\/\//i.test(v) && (/\/object\/sign\//.test(v) || /[?&]token=/.test(v)) ? stripSignedUrl(v) : v;
+  if (!v || typeof v !== "object" || depth > 8) return v;
+  if (Array.isArray(v)) return v.map((x) => deepStripSigned(x, depth + 1));
+  const out = {};
+  Object.keys(v).forEach((k) => {
+    out[k] = deepStripSigned(v[k], depth + 1);
+  });
+  return out;
+}
+
 // Uploads a data:/blob: URL to the evidence bucket and returns its public URL.
 // Anything that is already a normal URL (or empty) is returned untouched —
 // except that a temporary signed URL is turned back into the permanent one.
@@ -9897,7 +10718,7 @@ async function orderToRow(o) {
     region: o.region || CITY_REGION[o.city] || null,
     lawyer_id: lawyerId || null,
     courier_id: courierId || null,
-    data,
+    data: deepStripSigned(data),
   };
 }
 
@@ -9935,10 +10756,10 @@ async function visitToRow(order, a, seq, courierId) {
       verifiedIdType: a.verifiedIdType || null,
       verifiedIdLast4: a.verifiedIdLast4 || "",
     },
-    photo_url: photoUrl,
+    photo_url: deepStripSigned(photoUrl),
     photo_meta: a.photo ? { kind: a.photo.kind || "image", timestamp: a.photo.timestamp, gps: a.photo.gps ?? null } : null,
-    audio_url: audioUrl,
-    signature_url: signatureUrl,
+    audio_url: deepStripSigned(audioUrl),
+    signature_url: deepStripSigned(signatureUrl),
   };
 }
 
@@ -10491,6 +11312,8 @@ function useAuth() {
     register(email, password, {
       account_type: "lawyer",
       full_name: fullName.trim(),
+      // Marketing channel (?src=…) is recorded only at account creation.
+      ...(readSignupSource() ? { signup_source: readSignupSource() } : {}),
       // Referral data is accepted only here, at account creation (never later).
       ...(referredBy && verifyReferralCode(referredBy).ok
         ? { referred_by: verifyReferralCode(referredBy).code, ref_device_match: !!refDeviceMatch }
@@ -11648,6 +12471,11 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
             {backLink}
           </div>
         )}
+        {(mode === "in" || mode === "lawyer") && (
+          <div className="mt-4 border-t border-slate-100 pt-4">
+            <InstallAppButton className="w-full py-2.5 text-sm" />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -11943,11 +12771,12 @@ function AppInner() {
       onSignOut={auth.signOut}
       referredBy={(auth.session.user.user_metadata && auth.session.user.user_metadata.referred_by) || ""}
       referralDeviceMatch={!!(auth.session.user.user_metadata && auth.session.user.user_metadata.ref_device_match)}
+      signupSource={sanitizeSource(auth.session.user.user_metadata && auth.session.user.user_metadata.signup_source)}
     />
   );
 }
 
-function AppShell({ profile, onSignOut, referredBy = "", referralDeviceMatch = false }) {
+function AppShell({ profile, onSignOut, referredBy = "", referralDeviceMatch = false, signupSource = "" }) {
   const cloudOn = !!profile;
   // Welcome modal for brand-new clients (dismissal is remembered on this device).
   const [showWelcome, setShowWelcome] = useState(() => shouldShowWelcome(profile));
@@ -12165,6 +12994,8 @@ function AppShell({ profile, onSignOut, referredBy = "", referralDeviceMatch = f
           ? { referral: { code: referredBy, deviceMatch: !!referralDeviceMatch || deviceHasReferrer(referredBy) } }
           : {}),
         referralCredit: null,
+        // Marketing channel that brought the client (sign-up metadata first, then the remembered ?src=).
+        ...(cloudOn && profile.role === "lawyer" && (signupSource || readSignupSource()) ? { signupSource: signupSource || readSignupSource() } : {}),
         status: STATUS.PENDING,
         assignedCourier: "",
         createdDate: nowStamp(0),
