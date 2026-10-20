@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { createClient } from "@supabase/supabase-js";
+import { createPortal } from "react-dom";
 import {
   Briefcase,
   Truck,
@@ -1439,7 +1440,14 @@ function getOrderRates(order, pricing) {
 // payout lists. `completionBonus` is true when the order reached its full
 // completion payout inside the requested scope; `firstVisitBonus` is the
 // special case where that happened on visit 1.
-function calcOrderEarnings(order, pricing, monthKey = null) {
+// Who performed a visit: the courier stamped on the visit itself; older visits fall back to the order's courier.
+function visitCourierName(order, attempt) {
+  return (attempt && attempt.courier) || (order && order.assignedCourier) || "";
+}
+// Optional 4th argument `courierName`: only that courier's own visits are paid to him. The ₪ cap is still
+// computed over the whole order (one shared cap), so a reassignment never changes the order's total cost
+// and never takes away what an earlier courier already earned.
+function calcOrderEarnings(order, pricing, monthKey = null, courierName = null) {
   const rates = getOrderRates(order, pricing);
   const cap = rates.perCompleted;
   // A documented refusal legally ends the delivery process just like a signed
@@ -1470,9 +1478,10 @@ function calcOrderEarnings(order, pricing, monthKey = null) {
     allVisits.push({ attempt: a, visitNo: i + 1, pay, kind });
   });
 
+  const ownVisits = courierName ? allVisits.filter((v) => visitCourierName(order, v.attempt) === courierName) : allVisits;
   const perVisit = monthKey
-    ? allVisits.filter((v) => monthKeyOf(v.attempt.timestamp) === monthKey)
-    : allVisits;
+    ? ownVisits.filter((v) => monthKeyOf(v.attempt.timestamp) === monthKey)
+    : ownVisits;
   const total = perVisit.reduce((sum, v) => sum + v.pay, 0);
   return {
     visits: perVisit.length,
@@ -3334,42 +3343,72 @@ function isIosDevice() {
 }
 function InstallGuideModal({ open, onClose }) {
   const ios = isIosDevice();
-  return (
-    <Modal open={open} onClose={onClose} title="📲 התקנת האפליקציה בנייד">
-      {ios ? (
-        <ol className="space-y-3 text-sm text-slate-700">
-          <li className="flex items-start gap-3 rounded-2xl bg-slate-50 p-3">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">1</span>
-            <span>
-              לחצו על כפתור השיתוף <strong>Share</strong> <span className="text-lg">⬆️</span> בתחתית המסך (ב-Safari).
-            </span>
-          </li>
-          <li className="flex items-start gap-3 rounded-2xl bg-slate-50 p-3">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">2</span>
-            <span>
-              בחרו <strong>"הוסף למסך הבית"</strong> (<span dir="ltr">Add to Home Screen</span>) <span className="text-lg">➕</span> ולחצו על <strong>הוסף</strong>.
-            </span>
-          </li>
-          <li className="text-[12px] text-slate-400">האפליקציה תופיע כאייקון במסך הבית. בדפדפנים אחרים באייפון יש לפתוח את האתר ב-Safari.</li>
-        </ol>
-      ) : (
-        <ol className="space-y-3 text-sm text-slate-700">
-          <li className="flex items-start gap-3 rounded-2xl bg-slate-50 p-3">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">1</span>
-            <span>פתחו את תפריט הדפדפן (⋮ או ⋯) בפינה העליונה.</span>
-          </li>
-          <li className="flex items-start gap-3 rounded-2xl bg-slate-50 p-3">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">2</span>
-            <span>
-              בחרו <strong>"התקן אפליקציה"</strong> או <strong>"הוסף למסך הבית"</strong> (<span dir="ltr">Install app / Add to Home screen</span>) ➕ ואשרו.
-            </span>
-          </li>
-        </ol>
-      )}
-      <button type="button" onClick={onClose} className="mt-4 w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700">
-        הבנתי
-      </button>
-    </Modal>
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose && onClose();
+    };
+    window.document.addEventListener("keydown", onKey);
+    return () => window.document.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+  if (!open) return null;
+  // Rendered into <body>: the sticky, blurred header is a containing block for "fixed" children,
+  // which is what clipped this dialog at the top of the screen.
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="התקנת אפליקציה"
+      dir="rtl"
+      style={{ position: "fixed", inset: 0, zIndex: 99999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+    >
+      <div style={{ position: "absolute", inset: 0, background: "rgba(15,23,42,0.6)" }} onClick={onClose} />
+      <div
+        style={{ position: "relative", width: "100%", maxWidth: 448, maxHeight: "90vh", overflowY: "auto", WebkitOverflowScrolling: "touch" }}
+        className="rounded-3xl border border-slate-200/60 bg-white p-5 shadow-2xl"
+      >
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h3 className="text-base font-bold text-indigo-700">📲 התקנת אפליקציה</h3>
+          <button type="button" onClick={onClose} aria-label="סגירה" className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        {ios ? (
+          <ol className="space-y-3 text-sm text-slate-700">
+            <li className="flex items-start gap-3 rounded-2xl bg-slate-50 p-3">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">1</span>
+              <span>
+                לחצו על כפתור השיתוף <strong>Share</strong> <span className="text-lg">⬆️</span> בתחתית המסך (ב-Safari).
+              </span>
+            </li>
+            <li className="flex items-start gap-3 rounded-2xl bg-slate-50 p-3">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">2</span>
+              <span>
+                בחרו <strong>"הוסף למסך הבית"</strong> (<span dir="ltr">Add to Home Screen</span>) <span className="text-lg">➕</span> ולחצו על <strong>הוסף</strong>.
+              </span>
+            </li>
+            <li className="text-[12px] text-slate-400">האפליקציה תופיע כאייקון במסך הבית. בדפדפנים אחרים באייפון יש לפתוח את האתר ב-Safari.</li>
+          </ol>
+        ) : (
+          <ol className="space-y-3 text-sm text-slate-700">
+            <li className="flex items-start gap-3 rounded-2xl bg-slate-50 p-3">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">1</span>
+              <span>פתחו את תפריט הדפדפן (⋮ או ⋯) בפינה העליונה.</span>
+            </li>
+            <li className="flex items-start gap-3 rounded-2xl bg-slate-50 p-3">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">2</span>
+              <span>
+                בחרו <strong>"התקן אפליקציה"</strong> או <strong>"הוסף למסך הבית"</strong> (<span dir="ltr">Install app / Add to Home screen</span>) ➕ ואשרו.
+              </span>
+            </li>
+          </ol>
+        )}
+        <button type="button" onClick={onClose} className="mt-4 w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700">
+          הבנתי
+        </button>
+      </div>
+    </div>,
+    window.document.body
   );
 }
 function InstallAppButton({ compact = false, className = "" }) {
@@ -3575,13 +3614,13 @@ function TopNav({ view, setView }) {
   return (
     <header className="sticky top-0 z-40 border-b border-slate-200/60 bg-white/95 backdrop-blur">
       <div className="mx-auto max-w-7xl px-4 py-3 sm:px-6">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 to-blue-600 text-white">
+        <div className="flex items-center justify-between gap-2 sm:gap-4">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 to-blue-600 text-white">
               <Gavel className="h-5 w-5" />
             </div>
-            <div className="leading-tight">
-              <p className="text-sm font-extrabold text-indigo-700">מסירות משפטיות</p>
+            <div className="min-w-0 leading-tight">
+              <p className="truncate text-sm font-extrabold text-indigo-700">מסירות משפטיות</p>
               <p className="hidden text-[11px] text-slate-400 sm:block">
                 {signedIn ? `מחובר כ: ${session.profile.full_name} · סנכרון בזמן אמת` : "מצב הדגמה · החלפת תצוגה בין תפקידים"}
               </p>
@@ -5278,7 +5317,7 @@ function OrderHistoryList({ orders, onOpenAffidavit, onDeletePermanently }) {
 
 // "ריכוז חודשים": every month of the courier's work as its own card; opening
 // one shows its totals and the itemised pay per task.
-function CourierMonthlyEarnings({ orders, pricing, currentMonthKey }) {
+function CourierMonthlyEarnings({ orders, pricing, currentMonthKey, courier = null }) {
   const [selected, setSelected] = useState(currentMonthKey);
   const months = useMemo(() => {
     const keys = new window.Set([currentMonthKey]);
@@ -5288,7 +5327,7 @@ function CourierMonthlyEarnings({ orders, pricing, currentMonthKey }) {
       .reverse()
       .map((mk) => {
         const rows = orders
-          .map((o) => ({ o, calc: calcOrderEarnings(o, pricing, mk) }))
+          .map((o) => ({ o, calc: calcOrderEarnings(o, pricing, mk, courier) }))
           .filter((r) => r.calc.visits > 0)
           .sort((x, y) => String(y.o.id).localeCompare(String(x.o.id), "he", { numeric: true }));
         return {
@@ -7400,12 +7439,16 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
 
   const currentMonthKey = monthKeyOf(nowStamp(0));
   const myOrders = orders.filter((o) => o.assignedCourier === currentCourier);
-  const myOrdersThisMonth = myOrders.filter((o) =>
-    effectiveAttempts(o).some((a) => monthKeyOf(a.timestamp) === currentMonthKey)
+  // Orders this courier earned money on: his current tasks plus tasks he visited and that were reassigned later.
+  const earnedOrders = orders.filter(
+    (o) => o.assignedCourier === currentCourier || effectiveAttempts(o).some((a) => visitCourierName(o, a) === currentCourier)
   );
-  const myEarnings = myOrders.reduce(
+  const myOrdersThisMonth = earnedOrders.filter((o) =>
+    effectiveAttempts(o).some((a) => visitCourierName(o, a) === currentCourier && monthKeyOf(a.timestamp) === currentMonthKey)
+  );
+  const myEarnings = earnedOrders.reduce(
     (acc, o) => {
-      const { visits, completed, total } = calcOrderEarnings(o, pricing, currentMonthKey);
+      const { visits, completed, total } = calcOrderEarnings(o, pricing, currentMonthKey, currentCourier);
       return { visits: acc.visits + visits, completed: acc.completed + completed, total: acc.total + total };
     },
     { visits: 0, completed: 0, total: 0 }
@@ -7513,7 +7556,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
   // into the buckets the three summary cards filter by.
   const earningRows = myOrdersThisMonth.map((o) => ({
     order: o,
-    calc: calcOrderEarnings(o, pricing, currentMonthKey),
+    calc: calcOrderEarnings(o, pricing, currentMonthKey, currentCourier),
   }));
   // "משימות שבוצעו": every finished order of this courier, newest first.
   const completedOrders = myOrders
@@ -7736,7 +7779,7 @@ function CourierView({ orders, onUpdateOrder, pricing, adjustments, payments, on
 
       {tab === "earnings" && (
         <div className="space-y-4">
-          <CourierMonthlyEarnings orders={myOrders} pricing={pricing} currentMonthKey={currentMonthKey} />
+          <CourierMonthlyEarnings orders={earnedOrders} pricing={pricing} currentMonthKey={currentMonthKey} courier={currentCourier} />
           <div className="rounded-2xl border border-slate-200/60 bg-white p-4">
             <div className="mb-1 flex items-start justify-between">
               <SectionHeading title="ההכנסות שלי" subtitle={monthLabel(currentMonthKey)} icon={Wallet} />
@@ -8613,17 +8656,21 @@ function CourierPayroll({
   const rows = useMemo(() => {
     const map = {};
     orders.forEach((o) => {
-      if (!o.assignedCourier) return;
-      const calc = calcOrderEarnings(o, pricing, month);
-      const { visits, completed, total } = calc;
-      if (visits === 0) return;
-      if (!map[o.assignedCourier]) {
-        map[o.assignedCourier] = { courier: o.assignedCourier, visits: 0, completed: 0, ordersTotal: 0, orders: [] };
-      }
-      map[o.assignedCourier].visits += visits;
-      map[o.assignedCourier].completed += completed;
-      map[o.assignedCourier].ordersTotal += total;
-      map[o.assignedCourier].orders.push({ order: o, visits, completed, total, calc });
+      // Every courier who performed visits is paid for them — even if the order was later
+      // reassigned to someone else (or to nobody) or finished by another courier.
+      const names = new window.Set(effectiveAttempts(o).map((a) => visitCourierName(o, a)).filter(Boolean));
+      names.forEach((name) => {
+        const calc = calcOrderEarnings(o, pricing, month, name);
+        const { visits, completed, total } = calc;
+        if (visits === 0) return;
+        if (!map[name]) {
+          map[name] = { courier: name, visits: 0, completed: 0, ordersTotal: 0, orders: [] };
+        }
+        map[name].visits += visits;
+        map[name].completed += completed;
+        map[name].ordersTotal += total;
+        map[name].orders.push({ order: o, visits, completed, total, calc });
+      });
     });
     return Object.values(map)
       .map((r) => {
@@ -13273,6 +13320,9 @@ function AppShell({ profile, onSignOut, referredBy = "", referralDeviceMatch = f
           o.id === id && !isAssignmentLocked(o)
             ? {
                 ...o,
+                // Reassignment keeps the full visit history. Every visit is first stamped with the courier who
+                // performed it, so that courier keeps the pay for it after the order moves to someone else.
+                attempts: (o.attempts || []).map((a) => (a.courier || !o.assignedCourier ? a : { ...a, courier: o.assignedCourier })),
                 assignedCourier: courier,
                 courierId: c ? c.id : null,
                 courierInfo: c ? { name: c.name, licenseNumber: c.licenseNumber, phone: c.phone } : null,
