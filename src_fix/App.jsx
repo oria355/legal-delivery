@@ -62,6 +62,8 @@ import {
   Calculator,
   QrCode,
   Smartphone,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 
 /* =========================================================================
@@ -2880,6 +2882,28 @@ function Field({ label, required, children }) {
       </span>
       {children}
     </label>
+  );
+}
+
+// Password field with a permanent show/hide button. The button is always rendered (never conditional),
+// is type="button" (never submits the form) and only changes the input's type, not its value.
+function PasswordInput({ className = "", ...props }) {
+  const [shown, setShown] = useState(false);
+  return (
+    <div className="relative">
+      <input {...props} type={shown ? "text" : "password"} className={`${className} pl-11`} />
+      <button
+        type="button"
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setShown((v) => !v)}
+        aria-label={shown ? "הסתר סיסמה" : "הצג סיסמה"}
+        aria-pressed={shown}
+        title={shown ? "הסתר סיסמה" : "הצג סיסמה"}
+        className="absolute left-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-indigo-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+      >
+        {shown ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+      </button>
+    </div>
   );
 }
 
@@ -11396,8 +11420,16 @@ function useAuth() {
   // "Reset Password"). The link signs the user in and the app then shows the
   // new-password screen (event PASSWORD_RECOVERY).
   const requestPasswordReset = async (email) => {
-    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: SITE_URL });
-    return error ? error.message : "";
+    // Success is reported only when Supabase accepted the request; every failure (including a network
+    // error) is returned so the screen never claims an e-mail was sent when the request failed.
+    const addr = String(email || "").trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(addr)) return "invalid email";
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(addr, { redirectTo: SITE_URL });
+      return error ? error.message || "reset failed" : "";
+    } catch (e) {
+      return (e && e.message) || "Failed to fetch";
+    }
   };
 
   const updatePassword = async (password) => {
@@ -11591,7 +11623,9 @@ function useCloudStore(profile, setters) {
             if (e0) throw e0;
           }
           for (let i = p.attempts.length; i < o.attempts.length; i += 1) {
-            const row = await visitToRow(o, o.attempts[i], i + 1, o.courierId || profileRef.current.id);
+            // The courier who records the visit is the one who performed it (an admin-side write falls back to the order's courier).
+            const performerId = profileRef.current.role === "courier" ? profileRef.current.id : o.courierId || profileRef.current.id;
+            const row = await visitToRow(o, o.attempts[i], i + 1, performerId);
             const { error: e } = await supabase.from("visits").insert(row);
             if (e && e.code !== "23505") throw e; // 23505 = already saved (retry)
           }
@@ -12034,6 +12068,11 @@ function friendlyAuthError(msg) {
   if (/at least \d+ characters/i.test(msg)) return "הסיסמה קצרה מדי (לפחות 6 תווים).";
   if (/same password|different from the old/i.test(msg)) return "הסיסמה החדשה חייבת להיות שונה מהקודמת.";
   if (/rate limit|too many/i.test(msg)) return "בוצעו יותר מדי ניסיונות. נסו שוב בעוד כמה דקות.";
+  if (/security purposes|only request this after/i.test(msg)) return "נשלחה בקשה לפני רגע. המתינו כדקה ונסו שוב.";
+  if (/invalid email|unable to validate email/i.test(msg)) return "כתובת האימייל אינה תקינה.";
+  if (/sending (recovery|confirmation|magic link|email)|error sending|smtp/i.test(msg))
+    return "שליחת המייל נכשלה — שירות הדוא\"ל של המערכת אינו זמין או אינו מוגדר כראוי. לא נשלח מייל. נסו שוב מאוחר יותר או פנו למנהל המערכת.";
+  if (/failed to fetch|network|fetch/i.test(msg)) return "אין חיבור לשרת. בדקו את החיבור לאינטרנט ונסו שוב. לא נשלח מייל.";
   return msg;
 }
 
@@ -12231,8 +12270,7 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
                   />
                 </Field>
                 <Field label="סיסמה" required>
-                  <input
-                    type="password"
+                  <PasswordInput
                     dir="ltr"
                     className={inputCls}
                     value={login.password}
@@ -12308,7 +12346,9 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
             <p>
               אם קיים חשבון עבור <strong dir="ltr">{login.email.trim()}</strong>, נשלח אליו כעת מייל עם קישור מאובטח לאיפוס הסיסמה.
             </p>
-            <p className="text-xs text-slate-400">לא קיבלתם? בדקו בתיקיית הספאם, או נסו שוב בעוד דקה.</p>
+            <p className="text-xs text-slate-400">
+              המייל עשוי להגיע בתוך מספר דקות. לא קיבלתם? בדקו בתיקיית הספאם, ודאו שהכתובת נכונה, או נסו שוב בעוד דקה. אם עדיין לא הגיע — פנו למנהל המערכת.
+            </p>
             {backLink}
           </div>
         )}
