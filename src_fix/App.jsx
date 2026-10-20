@@ -84,10 +84,10 @@ function useHeebo() {
 const DELIVERY_TRACKS = {
   legal: { key: "legal", label: "⚖️ מסירה משפטית (תקנה 161 — עד 3 ביקורים + תצהיר)", badge: "⚖️ מסירה משפטית", tone: "bg-indigo-50 text-indigo-700 ring-indigo-200" },
   municipal: { key: "municipal", label: "🏛️ מסירה לעיריות ורשויות (מכרזים / התראות / צווים)", badge: "🏛️ מסירה מוסדית/עירייה", tone: "bg-teal-50 text-teal-700 ring-teal-200" },
-  standard: { key: "standard", label: "📦 מסירה רגילה / עסקית לחברות (ביקור יחיד מהיר)", badge: "📦 מסירה רגילה", tone: "bg-slate-100 text-slate-700 ring-slate-200" },
+  standard: { key: "standard", label: "✉️ מסירת מסמכים רשמית", sub: "מסירת מסמכים רשמיים, חוזים ודואר רשום מבוקר למוסדות ותאגידים — באישור מסירה חתום", badge: "✉️ מסירת מסמכים רשמית", tone: "bg-slate-100 text-slate-700 ring-slate-200" },
   // Banks / financial institutions: personal delivery to the addressee only,
   // with mandatory ID verification (type + last 4 digits). No door posting.
-  bank: { key: "bank", label: "🏦 מסירה בנקאית / מאובטחת (זיהוי ת\"ז חובה · לנמען בלבד)", badge: "🏦 מסירה בנקאית — לנמען בלבד", tone: "bg-sky-50 text-sky-800 ring-sky-200" },
+  bank: { key: "bank", label: "🏦 מסירה בנקאית מאובטחת", sub: "לנמען בלבד · חובת זיהוי ת.ז. · חיסיון בנקאי", badge: "🏦 מסירה בנקאית — לנמען בלבד", tone: "bg-sky-50 text-sky-800 ring-sky-200" },
 };
 // Who received the document (Regulation 163(b)) and how residence was verified
 // before posting on the door (Regulation 161(4)(b)(2)).
@@ -102,6 +102,8 @@ const RESIDENCE_VERIFY = {
   business: "אומת מול בית העסק / השומר במקום",
 };
 const MUNICIPAL_DOC_TYPES = ["התראת ארנונה / גבייה", "צו עירוני / הנדסה", "מכתב רשמי / מכרז", "אחר"];
+// "✉️ מסירת מסמכים רשמית" (internal key stays "standard" for DB compatibility).
+const STANDARD_DOC_TYPES = ["מכתב רשמי / דואר רשום", "חוזה / הסכם לחתימה", "מסמכי מכרז / רכש", "הודעה רשמית מטעם מוסד/תאגיד", "אחר"];
 function trackOf(o) {
   const t = o && o.deliveryTrack;
   return t === "municipal" || t === "standard" || t === "bank" ? t : "legal";
@@ -1130,13 +1132,14 @@ const GPS_REASON_TEXT = {
 // "lat, lng" string, which is parsed instead. Returns null when no real
 // coordinates exist (e.g. a visit recorded without GPS).
 function mapUrlFor(visit) {
-  let lat = visit.lat;
-  let lng = visit.lng;
+  let lat = safeCoord(visit.lat);
+  let lng = safeCoord(visit.lng);
   if (lat == null || lng == null) {
     const m = String(visit.location || "").match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
     if (!m) return null;
-    lat = m[1];
-    lng = m[2];
+    lat = safeCoord(m[1]);
+    lng = safeCoord(m[2]);
+    if (lat == null || lng == null) return null;
   }
   return `https://www.google.com/maps?q=${lat},${lng}`;
 }
@@ -1678,7 +1681,75 @@ function escHtml(v) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// ---- Phase-1 hardening: safe media sources, signed-URL guard, coordinates ----
+// Anything that ends up in an <img>/<audio>/<video> src or in generated HTML
+// must pass isSafeMediaSrc(): either a base64 image/audio/video data URL (never
+// SVG), a local blob: URL of the current session (only where allowBlob is set),
+// or an https URL of THIS project's public "evidence" bucket. Temporary signed
+// URLs (/object/sign/ or ?token=) are display-only and are never trusted from
+// stored data.
+const SAFE_DATA_IMAGE = /^data:image\/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/i;
+const SAFE_DATA_MEDIA = /^data:(?:audio|video)\/[a-z0-9.+-]+(?:;codecs=[a-z0-9.,-]+)?;base64,[A-Za-z0-9+/]+={0,2}$/i;
+function supabaseHostOf() {
+  try {
+    return SUPABASE_URL ? new window.URL(SUPABASE_URL).host : "";
+  } catch (e) {
+    return "";
+  }
+}
+function isSafeMediaSrc(v, opts) {
+  const o = opts || {};
+  if (typeof v !== "string" || !v || v.length > 16000000) return false;
+  if (v.startsWith("data:")) return SAFE_DATA_IMAGE.test(v) || (o.kind === "media" && SAFE_DATA_MEDIA.test(v));
+  if (v.startsWith("blob:")) return !!o.allowBlob && /^blob:https?:\/\/[^\s"'<>]+$/i.test(v);
+  let u;
+  try {
+    u = new window.URL(v);
+  } catch (e) {
+    return false;
+  }
+  if (/[\s"'<>`\\]/.test(v)) return false;
+  if (u.protocol !== "https:" || u.username || u.password) return false;
+  if (/\/object\/sign\//.test(u.pathname) || u.searchParams.has("token")) return false;
+  const host = supabaseHostOf();
+  if (host ? u.host !== host : !/\.supabase\.co$/i.test(u.hostname)) return false;
+  return /^\/storage\/v1\/object\/public\/evidence\/[^?#]+$/.test(u.pathname);
+}
+// A signed (temporary) URL must never be written to orders / visits. Turn it
+// back into the permanent public-style URL of the same object (the path is
+// what identifies the file); any query string is dropped.
+function stripSignedUrl(v) {
+  if (typeof v !== "string" || !/^https:\/\//i.test(v)) return v;
+  try {
+    const u = new window.URL(v);
+    const m = /^\/storage\/v1\/object\/(?:sign|public)\/evidence\/(.+)$/.exec(u.pathname);
+    if (!m) return v;
+    if (u.pathname.includes("/object/sign/") || u.search) return `${u.origin}/storage/v1/object/public/evidence/${m[1]}`;
+    return v;
+  } catch (e) {
+    return v;
+  }
+}
+function safeCoord(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) && Math.abs(n) <= 180 ? n : null;
+}
+// <img> for generated documents: only a validated source, always escaped.
+function safeImgTag(src, alt, style) {
+  if (!isSafeMediaSrc(src)) return '<span class="meta">(תמונה לא זמינה)</span>';
+  return `<img src="${escHtml(src)}" alt="${escHtml(alt || "")}"${style ? ` style="${escHtml(style)}"` : ""} />`;
+}
+// Generated documents (affidavit, certificate, label) run no script at all and
+// may load images only as data: URLs or from this project's evidence host.
+function docCspMeta() {
+  const host = supabaseHostOf();
+  const img = host ? `data: https://${host}` : "data:";
+  return `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${escHtml(img)}; style-src 'unsafe-inline'; font-src data:; form-action 'none'" />`;
 }
 
 // Builds a full, self-contained, print-ready Hebrew/RTL "תצהיר מוסר" (affidavit
@@ -1862,20 +1933,22 @@ function buildAffidavitHtml(order, kind) {
             ? `<p class="meta">ביקור ${i + 1}: קובץ וידאו מצורף בתיק הדיגיטלי (${escHtml(a.photo.timestamp)}${
                 a.photo.gps ? ` · ${escHtml(a.photo.gps)}` : ""
               })</p>`
-            : `<figure><img src="${a.photo.dataUrl}" alt="תיעוד ביקור ${i + 1}" /><figcaption>ביקור ${i + 1} — ${escHtml(
+            : `<figure>${safeImgTag(a.photo.dataUrl, `תיעוד ביקור ${i + 1}`)}<figcaption>ביקור ${i + 1} — ${escHtml(
                 a.photo.timestamp
               )}${a.photo.gps ? ` · ${escHtml(a.photo.gps)}` : ""}</figcaption></figure>`
         );
       }
       if (a.signatureDataUrl) {
         parts.push(
-          `<figure><img src="${a.signatureDataUrl}" alt="חתימת הנמען" style="background:#fff" /><figcaption>חתימת הנמען — ביקור ${
+          `<figure>${safeImgTag(a.signatureDataUrl, "חתימת הנמען", "background:#fff")}<figcaption>חתימת הנמען — ביקור ${
             i + 1
           }</figcaption></figure>`
         );
       }
-      if (a.audio || a.audioRecorded) {
-        parts.push(`<p class="meta">ביקור ${i + 1}: הקלטת שמע מצורפת בתיק הדיגיטלי.</p>`);
+      if (a.audio) {
+        parts.push(`<p class="meta">ביקור ${i + 1}: הקלטת שמע נשמרה ומצורפת בתיק הדיגיטלי.</p>`);
+      } else if (a.audioRecorded || a.audioSaveFailed) {
+        parts.push(`<p class="meta">ביקור ${i + 1}: בוצעה הקלטת שמע במהלך הביקור, אך קובץ ההקלטה אינו שמור בתיק הדיגיטלי.</p>`);
       }
       return parts.join("");
     })
@@ -1887,7 +1960,9 @@ function buildAffidavitHtml(order, kind) {
       last.signatureDataUrl ? ", והמקבל אישר את קבלתו בחתימה דיגיטלית (מצורפת להלן)" : ""
     }.${last.deliveredToType ? ` ${receiverStatement(last)}` : ""}`;
   } else if (order.status === STATUS.REFUSED && last) {
-    outcome = `בביקור מס' ${attempts.length} סירב הנמען לקבל את המסמך. הסירוב תועד בצילום ובהקלטת שמע. ${escHtml(
+    outcome = `בביקור מס' ${attempts.length} סירב הנמען לקבל את המסמך. ${
+      last.audio ? "הסירוב תועד בצילום ובהקלטת שמע שנשמרה בתיק הדיגיטלי." : "הסירוב תועד בצילום; קובץ הקלטת שמע אינו שמור בתיק הדיגיטלי."
+    } ${escHtml(
       last.notes || ""
     )}`;
   } else if (order.status === STATUS.POSTED && last) {
@@ -1908,6 +1983,7 @@ function buildAffidavitHtml(order, kind) {
 <html dir="rtl" lang="he">
 <head>
 <meta charset="UTF-8" />
+${docCspMeta()}
 <base target="_blank" />
 <title>תצהיר מוסר — ${escHtml(formatOrderNum(order.id))}</title>
 <style>
@@ -1992,7 +2068,7 @@ function buildAffidavitHtml(order, kind) {
       <div class="meta">חתימת המצהיר/ה (השליח)</div>
       ${
         signed
-          ? `<img src="${order.affidavit.signature}" alt="חתימת השליח" style="height:60px;max-width:220px;" /><div class="meta">נחתם ב-${escHtml(
+          ? `${safeImgTag(order.affidavit.signature, "חתימת השליח", "height:60px;max-width:220px;")}<div class="meta">נחתם ב-${escHtml(
               order.affidavit.signedAt
             )}${order.affidavit.capturedBy ? ` (נקלט על ידי ${escHtml(order.affidavit.capturedBy)})` : ""}</div>`
           : '<div class="sig-line"></div><div class="meta">טרם נחתם</div>'
@@ -2017,8 +2093,8 @@ function buildAffidavitHtml(order, kind) {
       להצהיר את האמת וכי יהיה/תהיה צפוי/ה לעונשים הקבועים בחוק אם לא יעשה/תעשה כן, אישר/ה את נכונות הצהרתו/ה וחתם/ה עליה בפניי.
     </p>
     <div class="sig-row" style="margin-top:12px">
-      <div>${lawyerVerified && order.lawyerSignature ? `<img src="${escHtml(order.lawyerSignature)}" alt="חתימת עורך הדין" style="display:block;height:56px;max-width:230px;margin:0 auto -6px" />` : ""}<div class="sig-line"></div><div class="meta">חתימת עורך הדין</div></div>
-      <div>${lawyerVerified && order.lawyerStamp ? `<img src="${escHtml(order.lawyerStamp)}" alt="חותמת עורך הדין" style="display:block;height:64px;max-width:230px;margin:0 auto -6px" />` : ""}<div class="sig-line"></div><div class="meta">חותמת</div></div>
+      <div>${lawyerVerified && order.lawyerSignature ? `${safeImgTag(order.lawyerSignature, "חתימת עורך הדין", "display:block;height:56px;max-width:230px;margin:0 auto -6px")}` : ""}<div class="sig-line"></div><div class="meta">חתימת עורך הדין</div></div>
+      <div>${lawyerVerified && order.lawyerStamp ? `${safeImgTag(order.lawyerStamp, "חותמת עורך הדין", "display:block;height:64px;max-width:230px;margin:0 auto -6px")}` : ""}<div class="sig-line"></div><div class="meta">חותמת</div></div>
     </div>
     <p class="meta" style="margin:8px 0 0">${
       lawyerVerified
@@ -2048,11 +2124,11 @@ function buildDeliveryCertificateHtml(order) {
   const exact = (last.audit && last.audit.capturedAt) || last.timestamp || order.completedAt || "—";
   const photos = real
     .filter((a) => a.photo && a.photo.dataUrl && a.photo.kind !== "video")
-    .map((a, i) => `<figure><img src="${a.photo.dataUrl}" alt="תמונת ביקור" /><figcaption>ביקור ${i + 1} · ${escHtml(a.type)} · ${escHtml(a.timestamp)}</figcaption></figure>`)
+    .map((a, i) => `<figure>${safeImgTag(a.photo.dataUrl, "תמונת ביקור")}<figcaption>ביקור ${i + 1} · ${escHtml(a.type)} · ${escHtml(a.timestamp)}</figcaption></figure>`)
     .join("");
   const row = (k, v) => `<tr><th>${k}</th><td>${v}</td></tr>`;
   return `<!DOCTYPE html>
-<html lang="he" dir="rtl"><head><meta charset="utf-8" /><title>אישור מסירה ${escHtml(formatOrderNum(order.id))}</title>
+<html lang="he" dir="rtl"><head><meta charset="utf-8" />${docCspMeta()}<title>אישור מסירה ${escHtml(formatOrderNum(order.id))}</title>
 <style>
   body { font-family: Heebo, Arial, sans-serif; color:#111827; padding: 28px; max-width: 760px; margin: 0 auto; }
   h1 { text-align:center; font-size: 22px; margin: 0 0 4px; }
@@ -2077,7 +2153,7 @@ function buildDeliveryCertificateHtml(order) {
     ${row("מספר אסמכתא", escHtml(order.caseNumber || "—"))}
     ${row("נמען", escHtml(order.recipientName || "—"))}
     ${row("כתובת", escHtml(fullAddress))}
-    ${row("מסמך / חבילה", escHtml(order.docType === "אחר" ? order.customDocType || "אחר" : order.docType || "—"))}
+    ${row("סוג המסמך", escHtml(order.docType === "אחר" ? order.customDocType || "אחר" : order.docType || "—"))}
     ${row("סטטוס מסירה", escHtml(order.status || "—"))}
     ${row("אופן המסירה", escHtml(last.notes || "—"))}
     ${last.verifiedIdType ? row("אימות זהות הנמען", escHtml(idVerificationText(last))) : ""}
@@ -2090,8 +2166,8 @@ function buildDeliveryCertificateHtml(order) {
   <h3>תמונות מהביקור</h3>
   <div>${photos || '<p class="meta">לא צורפו תמונות.</p>'}</div>
   <div class="sigs">
-    <div><div>חתימת הנמען / מקבל</div>${sig ? `<img src="${sig}" alt="חתימת הנמען" />` : "<div>—</div>"}</div>
-    <div><div>חתימת השליח</div>${courierSig ? `<img src="${courierSig}" alt="חתימת השליח" />` : "<div>טרם נחתם</div>"}${
+    <div><div>חתימת הנמען / מקבל</div>${sig ? safeImgTag(sig, "חתימת הנמען") : "<div>—</div>"}</div>
+    <div><div>חתימת השליח</div>${courierSig ? safeImgTag(courierSig, "חתימת השליח") : "<div>טרם נחתם</div>"}${
       order.affidavit && order.affidavit.signedAt ? `<div style="font-size:11px">נחתם ב-${escHtml(order.affidavit.signedAt)}</div>` : ""
     }</div>
   </div>
@@ -2169,7 +2245,7 @@ const WAYBILL_TRACK_LABEL = {
   legal: "⚖️ מסירה משפטית",
   bank: "🏦 מסירה בנקאית — לנמען בלבד",
   municipal: "🏛️ דואר רשום מוסדי",
-  standard: "📦 מסירה רגילה",
+  standard: "✉️ מסירת מסמכים רשמית",
 };
 function buildWaybillHtml(order) {
   const track = trackOf(order);
@@ -2182,7 +2258,7 @@ function buildWaybillHtml(order) {
     `<tr><td>☐ ביקור ${i}</td><td>תאריך ושעה: ____ / ____ / ______ &nbsp; ____ : ____</td><td>☐ נמסר &nbsp;☐ אין מענה${track === "bank" ? "" : visits === 3 && i === 3 ? " &nbsp;☐ הדבקה" : ""}</td></tr>`;
   const rows = Array.from({ length: visits }, (_, i) => visitRow(i + 1)).join("");
   return `<!DOCTYPE html>
-<html lang="he" dir="rtl"><head><meta charset="utf-8" /><title>מדבקת ברקוד ${escHtml(num)}</title>
+<html lang="he" dir="rtl"><head><meta charset="utf-8" />${docCspMeta()}<title>מדבקת ברקוד ${escHtml(num)}</title>
 <style>
   @page { size: 105mm 148mm; margin: 4mm; }
   * { box-sizing: border-box; }
@@ -2351,7 +2427,7 @@ function bulkTrackOf(raw) {
   if (!t) return "legal";
   if (t.includes("בנק") || t.includes("bank")) return "bank";
   if (t.includes("עיריי") || t.includes("רשות") || t.includes("מוסד") || t.includes("דואררשום") || t.includes("municipal")) return "municipal";
-  if (t.includes("רגיל") || t.includes("עסקי") || t.includes("standard")) return "standard";
+  if (t.includes("רגיל") || t.includes("עסקי") || t.includes("רשמית") || t.includes("standard")) return "standard";
   return "legal";
 }
 // rows (first = header) -> [{ line, errors:[], form|null, price, track }]
@@ -2378,17 +2454,12 @@ function bulkRowsToOrders(rows) {
     if (!addr.street || !addr.houseNumber) errors.push("כתובת: נדרשים רחוב ומספר בית");
     if (!phone) errors.push("חסר טלפון");
     if ((track === "legal" || track === "bank") && !idNumber) errors.push("חסרה ת.ז. (חובה במסלול זה)");
-    const list = track === "municipal" ? MUNICIPAL_DOC_TYPES : track === "bank" ? BANK_DOC_TYPES : DOC_TYPES;
+    const list = track === "municipal" ? MUNICIPAL_DOC_TYPES : track === "bank" ? BANK_DOC_TYPES : track === "standard" ? STANDARD_DOC_TYPES : DOC_TYPES;
     const docRaw = get(r, "docType");
     const known = list.find((d) => bulkNorm(d) === bulkNorm(docRaw));
     let docType = known || (docRaw ? "אחר" : list[0]);
     let customDocType = !known && docRaw ? docRaw : "";
-    let packageDescription = "";
-    if (track === "standard") {
-      packageDescription = docRaw || "משלוח עסקי";
-      docType = packageDescription;
-      customDocType = "";
-    }
+    const packageDescription = "";
     const form = {
       recipientName,
       idNumber,
@@ -3130,10 +3201,10 @@ function NewOrderForm({ onCreate }) {
       ...f,
       deliveryTrack: t,
       maxVisits: t === "legal" ? 3 : 1,
-      docType: t === "municipal" ? MUNICIPAL_DOC_TYPES[0] : t === "bank" ? BANK_DOC_TYPES[0] : t === "standard" ? "משלוח עסקי" : DOC_TYPES[0],
+      docType: t === "municipal" ? MUNICIPAL_DOC_TYPES[0] : t === "bank" ? BANK_DOC_TYPES[0] : t === "standard" ? STANDARD_DOC_TYPES[0] : DOC_TYPES[0],
       customDocType: "",
     }));
-  const docTypeList = track === "municipal" ? MUNICIPAL_DOC_TYPES : track === "bank" ? BANK_DOC_TYPES : DOC_TYPES;
+  const docTypeList = track === "municipal" ? MUNICIPAL_DOC_TYPES : track === "bank" ? BANK_DOC_TYPES : track === "standard" ? STANDARD_DOC_TYPES : DOC_TYPES;
 
   const handleFile = (e) => {
     const f = e.target.files?.[0];
@@ -3165,8 +3236,7 @@ function NewOrderForm({ onCreate }) {
         ? {
             // Business delivery: no court / case fields at all.
             caseNumber: "", court: "", plaintiff: "", defendant: "",
-            docType: (form.packageDescription || "").trim() || "משלוח עסקי",
-            customDocType: "", maxVisits: 1,
+            maxVisits: 1,
           }
         : track === "municipal"
         ? { plaintiff: "", defendant: "", maxVisits: Number(form.maxVisits) === 3 ? 3 : 1 }
@@ -3201,6 +3271,7 @@ function NewOrderForm({ onCreate }) {
             }`}
           >
             {t.label}
+            {t.sub && <span className="mt-0.5 block text-[11px] font-normal leading-snug text-slate-500">{t.sub}</span>}
           </button>
         ))}
       </div>
@@ -3264,10 +3335,10 @@ function NewOrderForm({ onCreate }) {
 
       {track === "standard" && (
         <>
-          <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">פרטי המשלוח</p>
+          <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">פרטי המסמך</p>
           <div className="grid grid-cols-1 gap-4">
-            <Field label="תיאור החבילה / המעטפה">
-              <input className={inputCls} placeholder="לדוגמה: מעטפה עם חוזים / חבילה קטנה" value={form.packageDescription} onChange={update("packageDescription")} />
+            <Field label="תיאור המסמך / המעטפה (אופציונלי)">
+              <input className={inputCls} placeholder="לדוגמה: חוזה שכירות לחתימה" value={form.packageDescription} onChange={update("packageDescription")} />
             </Field>
           </div>
         </>
@@ -3432,7 +3503,6 @@ function NewOrderForm({ onCreate }) {
       </div>
 
       <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-        {track !== "standard" && (
         <Field label="סוג מסמך" required>
           <div className="relative">
             <select
@@ -3457,7 +3527,6 @@ function NewOrderForm({ onCreate }) {
             />
           )}
         </Field>
-        )}
 
         <Field label={form.addons.printing ? "קובץ המסמך להדפסה (PDF) — חובה" : "קובץ המסמך (PDF)"}>
           <label
@@ -3554,6 +3623,9 @@ function NewOrderForm({ onCreate }) {
 function EvidencePhoto({ photo, label = "צילום" }) {
   const [open, setOpen] = useState(false);
   if (!photo || !photo.dataUrl) return null;
+  if (!isSafeMediaSrc(photo.dataUrl, { kind: "media", allowBlob: true })) {
+    return <p className="mt-2 text-[11px] text-slate-400">{label}: המדיה אינה זמינה או לא אומתה</p>;
+  }
   return (
     <div className="mt-2">
       <p className="mb-1 text-[11px] font-semibold text-slate-500">{label}</p>
@@ -3645,13 +3717,15 @@ function AttemptEvidence({ attempt: a, courier }) {
         </p>
       )}
       <EvidencePhoto photo={a.photo} label={photoLabelFor(a.type)} />
-      {a.audio && (
+      {a.audio && isSafeMediaSrc(a.audio, { kind: "media", allowBlob: true }) && (
         <audio controls src={a.audio} className="mt-2 h-8 w-full">
           <track kind="captions" />
         </audio>
       )}
-      {!a.audio && a.audioRecorded && <p className="mt-1 text-[11px] text-slate-400">🎙️ הקלטה תועדה</p>}
-      {a.signatureDataUrl && (
+      {!(a.audio && isSafeMediaSrc(a.audio, { kind: "media", allowBlob: true })) && (a.audioRecorded || a.audioSaveFailed) && (
+        <p className="mt-1 text-[11px] font-medium text-amber-700">🎙️ בוצעה הקלטה — הקובץ אינו שמור בשרת</p>
+      )}
+      {a.signatureDataUrl && isSafeMediaSrc(a.signatureDataUrl, { allowBlob: true }) && (
         <div className="mt-2">
           <p className="text-[11px] text-slate-400">חתימת הנמען</p>
           <img src={a.signatureDataUrl} alt="חתימת הנמען" className="h-14 rounded border border-slate-200/60 bg-white p-1" />
@@ -3816,7 +3890,7 @@ function OrderDetailsModal({ order, onClose, onOpenAffidavit, onCancel, showPric
           {isAffidavitSigned(order) ? (
             <div className="space-y-2">
               <img
-                src={order.affidavit.signature}
+                src={isSafeMediaSrc(order.affidavit.signature, { allowBlob: true }) ? order.affidavit.signature : undefined}
                 alt="חתימת השליח"
                 className="h-20 max-w-full rounded border border-slate-200/60 bg-white object-contain p-1"
               />
@@ -3871,6 +3945,14 @@ function InfoRow({ label, value, action }) {
 // One thumbnail that opens full size in a new tab, with a download link.
 function EvidenceThumb({ src, label, name }) {
   if (!src || src === "SIGNED") return null;
+  if (!isSafeMediaSrc(src, { allowBlob: true })) {
+    return (
+      <figure className="w-24 text-center">
+        <div className="flex h-24 w-24 items-center justify-center rounded-lg border border-dashed border-slate-300 text-[10px] text-slate-400">לא זמין</div>
+        <figcaption className="mt-1 text-[11px] leading-tight text-slate-500">{label}</figcaption>
+      </figure>
+    );
+  }
   return (
     <figure className="w-24 text-center">
       <a href={src} target="_blank" rel="noopener noreferrer" title="לחצו לצפייה בגודל מלא">
@@ -4980,9 +5062,9 @@ function PhotoUpload({ label, onCaptured, invalid, getStamp }) {
       ) : (
         <div className="flex items-center gap-3 rounded-lg border border-slate-200/60 p-2">
           {photo.kind === "video" ? (
-            <video src={photo.url} muted playsInline className="h-16 w-16 rounded-md bg-black object-cover" />
+            <video src={isSafeMediaSrc(photo.url, { kind: "media", allowBlob: true }) ? photo.url : undefined} muted playsInline className="h-16 w-16 rounded-md bg-black object-cover" />
           ) : (
-            <img src={photo.url} alt="תיעוד" className="h-16 w-16 rounded-md object-cover" />
+            <img src={isSafeMediaSrc(photo.url, { allowBlob: true }) ? photo.url : undefined} alt="תיעוד" className="h-16 w-16 rounded-md object-cover" />
           )}
           <div className="flex-1 text-xs text-slate-500">
             <p className="flex items-center gap-1 font-medium text-slate-600">
@@ -5780,7 +5862,7 @@ function CourierTaskCard({ order, onAction, onRequestPrice, onPickup }) {
       )}
       {needsCustody(order) &&
         (order.pickedUpAt ? (
-          <p className="mt-2 text-[11px] font-medium text-emerald-700">📦 נקלט לחלוקה ב-{order.pickedUpAt}</p>
+          <p className="mt-2 text-[11px] font-medium text-emerald-700">✉️ המסמכים נקלטו למשמורת ב-{order.pickedUpAt}</p>
         ) : (
           onPickup && (
             <button
@@ -5788,7 +5870,7 @@ function CourierTaskCard({ order, onAction, onRequestPrice, onPickup }) {
               onClick={() => onPickup(order)}
               className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
             >
-              📦 סמן נאסף מהלקוח / נקלט לחלוקה
+              ✉️ סמן קליטת מסמכים למשמורת
             </button>
           )
         ))}
@@ -6879,9 +6961,27 @@ function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
   // app around it.
   const printAffidavit = () => {
     const w = frameRef.current && frameRef.current.contentWindow;
-    if (w) {
+    try {
+      if (!w) throw new Error("no frame");
       w.focus();
       w.print();
+    } catch (e) {
+      // Some mobile browsers refuse print() inside a sandboxed frame: print the same
+      // (script-free, escaped) document from its own window instead.
+      const win = window.open("", "_blank");
+      if (win && win.document) {
+        win.document.open();
+        win.document.write(buildAffidavitHtml(order, docKind));
+        win.document.close();
+        setTimeout(() => {
+          try {
+            win.focus();
+            win.print();
+          } catch (e2) {
+            /* the page stays open for manual printing */
+          }
+        }, 400);
+      }
     }
   };
 
@@ -6919,6 +7019,7 @@ function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
         ref={frameRef}
         title={`תצהיר מוסר ${formatOrderNum(order.id)}`}
         srcDoc={buildAffidavitHtml(order, docKind)}
+        sandbox="allow-same-origin allow-modals allow-popups allow-popups-to-escape-sandbox"
         className="h-[60vh] w-full rounded-lg border border-slate-200/60 bg-white"
       />
 
@@ -6963,7 +7064,7 @@ function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
                   onClick={() => setVSigning(true)}
                   className="flex h-20 w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-indigo-300 bg-white text-indigo-600 hover:bg-indigo-50"
                 >
-                  {vSig ? <img src={vSig} alt="חתימת עורך הדין" className="h-16 object-contain" /> : (<><PenTool className="h-5 w-5" /> חתמו כאן</>)}
+                  {vSig ? <img src={isSafeMediaSrc(vSig) ? vSig : undefined} alt="חתימת עורך הדין" className="h-16 object-contain" /> : (<><PenTool className="h-5 w-5" /> חתמו כאן</>)}
                 </button>
               </div>
               <div>
@@ -6986,7 +7087,7 @@ function AffidavitModal({ order, onClose, onSign, onLawyerVerify }) {
                   <input type="file" accept="image/*" onChange={handleStampUpload} className="mb-2 block w-full text-xs text-slate-600" />
                 )}
                 {finalStamp ? (
-                  <img src={finalStamp} alt="חותמת" className="h-16 rounded border border-slate-200 bg-white object-contain p-1" />
+                  <img src={isSafeMediaSrc(finalStamp) ? finalStamp : undefined} alt="חותמת" className="h-16 rounded border border-slate-200 bg-white object-contain p-1" />
                 ) : (
                   <p className="text-[11px] text-slate-400">{vStampMode === "upload" ? "בחרו תמונת חותמת" : "החותמת תיווצר לאחר הזנת מספר רישיון"}</p>
                 )}
@@ -8707,10 +8808,10 @@ function AdminDashboard({
                               onClick={() => onMarkPickedUp(o.id)}
                               className="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
                             >
-                              📦 סמן נאסף מהלקוח / נקלט לחלוקה
+                              ✉️ סמן קליטת מסמכים למשמורת
                             </button>
                           )}
-                          {needsCustody(o) && o.pickedUpAt && <span className="text-[10px] font-medium text-emerald-700">📦 נקלט {o.pickedUpAt}</span>}
+                          {needsCustody(o) && o.pickedUpAt && <span className="text-[10px] font-medium text-emerald-700">✉️ נקלט למשמורת {o.pickedUpAt}</span>}
                           {isTerminalOrder(o) ? (
                             <button
                               onClick={() => setAffidavitOrder(o)}
@@ -8952,6 +9053,10 @@ const SITE_URL = (
    ------------------------------------------------------------------------- */
 const NOTIFY_SUPPORTED = () => typeof window.Notification !== "undefined" && !!window.navigator.serviceWorker;
 
+// The one and only text of the "new delivery waiting for assignment" alert for
+// the admin — in-app banner, browser / push notification and webhook payloads.
+const ADMIN_NEW_ORDER_MSG = "מסירה חדשה ממתינה לשיבוץ (אבא תודה)";
+
 async function registerServiceWorker() {
   try {
     await window.navigator.serviceWorker.register("/sw.js");
@@ -8967,8 +9072,8 @@ async function showNewOrderNotification(order) {
   const reg = await registerServiceWorker();
   if (!reg) return;
   const address = [`${order.street || ""} ${order.houseNumber || ""}`.trim(), order.city].filter(Boolean).join(", ");
-  reg.showNotification("מסירות משפטיות — מסירה חדשה ממתינה לשיבוץ", {
-    body: `מסירה חדשה (${formatOrderNum(order.id)}) מאת ${order.submittedBy || "—"} לכתובת ${address || "—"} ממתינה לשיבוץ שליח`,
+  reg.showNotification(ADMIN_NEW_ORDER_MSG, {
+    body: `מס' הזמנה ${formatOrderNum(order.id)} · לקוח: ${order.submittedBy || "—"} · כתובת: ${address || "—"}`,
     tag: `new-order-${order.id}`,
     dir: "rtl",
     lang: "he",
@@ -9046,7 +9151,7 @@ function AssignBanner({ order, orderId, couriers, responses, onAssign, onClose }
     <div className="rounded-2xl border border-orange-300 bg-orange-50 p-4 shadow-sm">
       <div className="mb-2 flex items-center justify-between gap-2">
         <p className="flex items-center gap-1.5 text-sm font-extrabold text-orange-700">
-          <Bell className="h-4 w-4" /> מסירה חדשה ממתינה לשיבוץ — {orderId}
+          <Bell className="h-4 w-4" /> {ADMIN_NEW_ORDER_MSG} — {orderId}
         </p>
         <button type="button" onClick={onClose} aria-label="סגירה" className="text-orange-500 hover:text-orange-700">
           <X className="h-4 w-4" />
@@ -9124,11 +9229,46 @@ const MIME_EXT = {
 };
 const uploadCache = new window.Map();
 
+// Evidence-upload problems are never silent: every failed upload is reported to
+// the listeners (the cloud store turns them into a visible banner with a retry
+// button). Images still fall back to a small inline copy so the evidence is
+// kept; audio / video have no safe inline fallback and are reported as NOT saved.
+const evidenceIssueListeners = new window.Set();
+function reportEvidenceIssue(issue) {
+  evidenceIssueListeners.forEach((fn) => {
+    try {
+      fn(issue);
+    } catch (e) {
+      /* a listener must never break an upload */
+    }
+  });
+}
+// A failed upload is remembered for a few seconds only, so the visit row and its
+// mirror copy (same media, saved in the same pass) do not each retry and report
+// it — but the NEXT save, or the retry button, tries again.
+const uploadFailCache = new window.Map();
+const UPLOAD_FAIL_TTL_MS = 15000;
+const isLocalMedia = (v) => typeof v === "string" && (v.startsWith("data:") || v.startsWith("blob:"));
+// True while an order still holds media that exists only on this device
+// (not yet a Storage URL). Used by the "retry" action.
+function orderHasUnsentMedia(o) {
+  if (!o) return false;
+  const att = (o.attempts || []).filter((a) => !a.synthetic);
+  return (
+    att.some((a) => isLocalMedia(a.photo && a.photo.dataUrl) || isLocalMedia(a.audio) || isLocalMedia(a.signatureDataUrl)) ||
+    isLocalMedia(o.affidavit && o.affidavit.signature) ||
+    isLocalMedia(o.signature)
+  );
+}
+
 // Uploads a data:/blob: URL to the evidence bucket and returns its public URL.
-// Anything that is already a normal URL (or empty) is returned untouched.
+// Anything that is already a normal URL (or empty) is returned untouched —
+// except that a temporary signed URL is turned back into the permanent one.
 async function uploadEvidence(path, value) {
-  if (typeof value !== "string" || !(value.startsWith("data:") || value.startsWith("blob:"))) return value || null;
+  if (typeof value !== "string" || !(value.startsWith("data:") || value.startsWith("blob:"))) return stripSignedUrl(value) || null;
   if (uploadCache.has(value)) return uploadCache.get(value);
+  const failed = uploadFailCache.get(value);
+  if (failed && window.Date.now() - failed.ts < UPLOAD_FAIL_TTL_MS) return failed.fallback;
   let type = "";
   try {
     const blob = await (await fetch(value)).blob();
@@ -9140,18 +9280,27 @@ async function uploadEvidence(path, value) {
     if (error) throw error;
     const { data } = supabase.storage.from(EVIDENCE_BUCKET).getPublicUrl(fullPath);
     uploadCache.set(value, data.publicUrl);
+    uploadFailCache.delete(value);
     return data.publicUrl;
   } catch (e) {
     // A storage failure (size limit, 400, network) must NEVER abort saving the
     // visit. Images fall back to a tiny inline copy (900 px, JPEG 0.65, ~60 KB)
     // stored in the row itself, so the legal evidence is never lost.
-    console.warn("Storage upload failed, using inline fallback:", path, e);
+    console.warn("Storage upload failed:", path, e);
     let fallback = null;
     if (!type || type.startsWith("image/")) {
       const small = await compressDataUrl(value, 900, 0.65).catch(() => null);
       fallback = typeof small === "string" && small.startsWith("data:image/") ? small : null;
     }
-    uploadCache.set(value, fallback);
+    // Not cached as a success: a later save (or the retry button) uploads again.
+    uploadFailCache.set(value, { ts: window.Date.now(), fallback });
+    const kind = type.startsWith("video/") ? "video" : type.startsWith("audio/") || /-audio$/.test(path) ? "audio" : "image";
+    reportEvidenceIssue({
+      orderId: String(path).split("/")[0],
+      kind,
+      saved: fallback ? "inline" : "none",
+      reason: (e && e.message) || String(e),
+    });
     return fallback;
   }
 }
@@ -9179,6 +9328,7 @@ async function visitMirror(order, a, i) {
     notes: a.notes || "",
     courier: a.courier || order.assignedCourier || "",
     audioRecorded: !!(a.audioRecorded || audioUrl),
+    audioSaveFailed: !!(typeof a.audio === "string" && a.audio && !audioUrl),
     audit: a.audit || null,
     deliveryMode: a.deliveryMode || null,
     deliveredToType: a.deliveredToType || null,
@@ -9208,11 +9358,13 @@ async function orderToRow(o) {
       signature: await uploadEvidence(`${o.id}/affidavit-signature`, data.affidavit.signature),
     };
   }
-  if (typeof data.signature === "string" && data.signature.startsWith("data:")) {
-    data.signature = await uploadEvidence(`${o.id}/recipient-signature`, data.signature);
+  if (typeof data.signature === "string") {
+    data.signature = data.signature.startsWith("data:")
+      ? await uploadEvidence(`${o.id}/recipient-signature`, data.signature)
+      : stripSignedUrl(data.signature);
   }
   for (const k of ["lawyerSignature", "lawyerStamp"]) {
-    if (typeof data[k] === "string" && data[k].startsWith("data:")) data[k] = await uploadEvidence(`${o.id}/${k}`, data[k]);
+    if (typeof data[k] === "string") data[k] = data[k].startsWith("data:") ? await uploadEvidence(`${o.id}/${k}`, data[k]) : stripSignedUrl(data[k]);
   }
   return {
     id: o.id,
@@ -9248,6 +9400,7 @@ async function visitToRow(order, a, seq, courierId) {
       notes: a.notes || "",
       courier: a.courier || order.assignedCourier || "",
       audioRecorded: !!(a.audioRecorded || audioUrl),
+      audioSaveFailed: !!(typeof a.audio === "string" && a.audio && !audioUrl),
       audit: a.audit || null,
       deliveryMode: a.deliveryMode || null,
       deliveredToType: a.deliveredToType || null,
@@ -9475,7 +9628,7 @@ async function notifyNewOrder(o) {
     const address = `${o.street || ""} ${o.houseNumber || ""}${o.apartment ? "/" + o.apartment : ""}, ${o.city || ""}`.trim();
     const speedLabel = (SPEED_OPTIONS.find((x) => x.key === (o.speed || "standard")) || SPEED_OPTIONS[0]).label;
     const message = [
-      "הזמנת מסירה חדשה",
+      ADMIN_NEW_ORDER_MSG,
       `מספר הזמנה: ${formatOrderNum(o.id)}`,
       `לקוח: ${o.submittedBy || ""}${info.firm ? " (" + info.firm + ")" : ""}`,
       `נמען: ${o.recipientName}`,
@@ -9506,7 +9659,9 @@ async function notifyNewOrder(o) {
       addons: [o.addons && o.addons.tracing ? "איתור כתובת" : "", o.addons && o.addons.printing ? "הדפסת מסמכים" : ""].filter(Boolean).join(", "),
       notes: o.notes || "",
       price_total: String(price.total),
-      subject: `הזמנת מסירה חדשה ${formatOrderNum(o.id)} — ${o.city || ""}`,
+      subject: ADMIN_NEW_ORDER_MSG,
+      admin_message: ADMIN_NEW_ORDER_MSG,
+      order_label: `${formatOrderNum(o.id)} — ${o.city || ""}`,
       message,
     });
     await window.fetch(NEW_ORDER_WEBHOOK_URL, { method: "POST", mode: "no-cors", body, keepalive: true });
@@ -9574,7 +9729,8 @@ async function notifyAdminNewOrder(o) {
     const body = new window.URLSearchParams({
       event: "new_order",
       notify_email: ADMIN_NOTIFY_EMAIL,
-      subject: "מסירה חדשה (אבא תודה)",
+      subject: ADMIN_NEW_ORDER_MSG,
+      admin_message: ADMIN_NEW_ORDER_MSG,
       assign_url: assignUrl,
       order_id: String(o.id || ""),
       client: o.submittedBy || "",
@@ -9585,7 +9741,7 @@ async function notifyAdminNewOrder(o) {
       doc_type: (o.docType === "אחר" && o.customDocType ? o.customDocType : o.docType) || "",
       urgent: o.urgent ? "yes" : "no",
       created_at: new window.Date().toISOString(),
-      message: `מסירה חדשה (אבא תודה)\nלקוח: ${o.submittedBy || ""}\nנמען: ${o.recipientName || ""}\nיעד: ${destination}\nמס' הזמנה: ${formatOrderNum(o.id)}\nלשיבוץ שליח: ${assignUrl}`,
+      message: `${ADMIN_NEW_ORDER_MSG}\nלקוח: ${o.submittedBy || ""}\nנמען: ${o.recipientName || ""}\nיעד: ${destination}\nמס' הזמנה: ${formatOrderNum(o.id)}\nלשיבוץ שליח: ${assignUrl}`,
     });
     await window.fetch(COURIER_WEBHOOK_URL, { method: "POST", mode: "no-cors", body, keepalive: true });
     return true;
@@ -9888,6 +10044,26 @@ function useCloudStore(profile, setters) {
   const profileId = profile ? profile.id : null;
   const [ready, setReady] = useState(!profile);
   const [error, setError] = useState("");
+  // Evidence uploads that failed (reported by uploadEvidence) — shown as a banner.
+  const [evidenceIssue, setEvidenceIssue] = useState(null);
+  const [evidenceOk, setEvidenceOk] = useState(false);
+  const issueSeqRef = useRef(0);
+  useEffect(() => {
+    const onIssue = (issue) => {
+      issueSeqRef.current += 1;
+      setEvidenceOk(false);
+      setEvidenceIssue((cur) => {
+        const base = cur || { none: 0, inline: 0, orderIds: [] };
+        return {
+          none: base.none + (issue.saved === "none" ? 1 : 0),
+          inline: base.inline + (issue.saved === "inline" ? 1 : 0),
+          orderIds: base.orderIds.includes(issue.orderId) ? base.orderIds : [...base.orderIds, issue.orderId],
+        };
+      });
+    };
+    evidenceIssueListeners.add(onIssue);
+    return () => evidenceIssueListeners.delete(onIssue);
+  }, []);
   const settersRef = useRef(setters);
   settersRef.current = setters;
   const profileRef = useRef(profile);
@@ -10025,6 +10201,30 @@ function useCloudStore(profile, setters) {
           if (!data || !data.length) throw new Error("אין הרשאה לעדכן את ההזמנה " + o.id);
         }
       });
+    };
+
+    // Retry the uploads of orders that still hold media on this device. It only
+    // re-sends the media and rewrites orders.data (the visit rows are immutable);
+    // returns how many orders were queued — 0 means nothing is left on this device
+    // (e.g. the page was reloaded) and the evidence has to be captured again.
+    const retryEvidence = (ordersNow, onlyIds) => {
+      const ids = new window.Set((onlyIds || []).map(String));
+      const pend = (ordersNow || []).filter((o) => orderHasUnsentMedia(o) && (!ids.size || ids.has(String(o.id))));
+      if (!pend.length) return 0;
+      uploadFailCache.clear();
+      setEvidenceIssue(null);
+      setEvidenceOk(false);
+      const seq = issueSeqRef.current;
+      enqueue(async () => {
+        for (const o of pend) {
+          const row = await orderToRow(o);
+          const { data, error: e } = await supabase.from("orders").update({ data: row.data }).eq("id", o.id).select("id");
+          if (e) throw e;
+          if (!data || !data.length) throw new Error("אין הרשאה לעדכן את ההזמנה " + o.id);
+        }
+        if (issueSeqRef.current === seq) setEvidenceOk(true);
+      });
+      return pend.length;
     };
 
     // Lawyer/admin cancellation. Goes through a SECURITY DEFINER RPC that
@@ -10217,6 +10417,7 @@ function useCloudStore(profile, setters) {
       refreshCouriers,
       refreshSettings,
       persistOrders,
+      retryEvidence,
       cancelOrder,
       deleteOrder,
       saveLawyerVerification,
@@ -10279,7 +10480,77 @@ function useCloudStore(profile, setters) {
     };
   }, [profileId, api]);
 
-  return { ready, error, clearError: () => setError(""), ...api };
+  return {
+    ready,
+    error,
+    clearError: () => setError(""),
+    evidenceIssue,
+    evidenceOk,
+    clearEvidenceIssue: () => {
+      setEvidenceIssue(null);
+      setEvidenceOk(false);
+    },
+    ...api,
+  };
+}
+
+// Visible warning when evidence files could not be uploaded (never silent).
+// "Retry" re-sends whatever is still held on this device.
+function EvidenceIssueBanner({ issue, ok, canRetry, onRetry, onClose }) {
+  const [note, setNote] = useState("");
+  useEffect(() => {
+    if (!ok) return undefined;
+    const t = setTimeout(onClose, 7000);
+    return () => clearTimeout(t);
+  }, [ok]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (ok && !issue) {
+    return (
+      <div role="status" className="mx-auto mt-3 flex max-w-5xl items-center gap-2 rounded-2xl bg-emerald-50 px-4 py-2.5 text-xs font-medium text-emerald-800 ring-1 ring-inset ring-emerald-200">
+        <Check className="h-4 w-4 shrink-0" />
+        <span className="flex-1">הקבצים נשלחו מחדש ונשמרו בשרת.</span>
+        <button type="button" onClick={onClose} aria-label="סגירה"><X className="h-4 w-4" /></button>
+      </div>
+    );
+  }
+  if (!issue) return null;
+  const lost = issue.none > 0;
+  return (
+    <div
+      role="alert"
+      className={`mx-auto mt-3 flex max-w-5xl items-start gap-2 rounded-2xl px-4 py-2.5 text-xs font-medium ring-1 ring-inset ${
+        lost ? "bg-rose-50 text-rose-800 ring-rose-200" : "bg-amber-50 text-amber-900 ring-amber-200"
+      }`}
+    >
+      <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+      <div className="flex-1">
+        {lost ? (
+          <p>
+            <strong>לא כל הראיות נשמרו בשרת:</strong> {issue.none} קבצים (הקלטה / וידאו / תמונה) לא הועלו ולא נשמרו. אל תסגרו ואל תרעננו את האפליקציה — לחצו
+            "נסה שוב". קובץ שלא הועלה לא יופיע בתיק ובתצהיר.
+          </p>
+        ) : (
+          <p>
+            <strong>העלאה לשרת נכשלה:</strong> {issue.inline} תמונות / חתימות נשמרו כעותק מכווץ בתוך ההזמנה (לא נאבדו). מומלץ לנסות שוב כשיש קליטה טובה.
+          </p>
+        )}
+        {issue.none > 0 && issue.inline > 0 && <p className="mt-0.5">בנוסף, {issue.inline} תמונות / חתימות נשמרו כעותק מכווץ בתוך ההזמנה.</p>}
+        {note && <p className="mt-1 font-semibold">{note}</p>}
+        {canRetry && (
+          <button
+            type="button"
+            onClick={() => {
+              const n = onRetry();
+              setNote(n ? "" : "לא נמצאו קבצים שמורים במכשיר לשליחה מחדש (ייתכן שהדף נטען מחדש). יש לצלם / להקליט מחדש.");
+            }}
+            className="mt-1.5 inline-flex items-center gap-1 rounded-lg bg-white/80 px-2.5 py-1 font-bold ring-1 ring-inset ring-current hover:bg-white"
+          >
+            <RotateCcw className="h-3.5 w-3.5" /> נסה שוב
+          </button>
+        )}
+      </div>
+      <button type="button" onClick={onClose} aria-label="סגירה"><X className="h-4 w-4" /></button>
+    </div>
+  );
 }
 
 // Shown after the user clicks the link in the password-reset email.
@@ -11640,6 +11911,13 @@ function AppShell({ profile, onSignOut }) {
         <div className="absolute bottom-0 right-1/4 h-80 w-80 rounded-full bg-purple-200/20 blur-3xl" />
       </div>
       <TopNav view={view} setView={setView} />
+      <EvidenceIssueBanner
+        issue={cloud.evidenceIssue}
+        ok={cloud.evidenceOk}
+        canRetry={cloudOn && (profile.role === "admin" || profile.role === "courier")}
+        onRetry={() => cloud.retryEvidence(ordersRef.current, cloud.evidenceIssue ? cloud.evidenceIssue.orderIds : [])}
+        onClose={cloud.clearEvidenceIssue}
+      />
       {cloud.error && (
         <div
           role="alert"
