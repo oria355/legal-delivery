@@ -4576,19 +4576,14 @@ function NewOrderForm({ onCreate }) {
             onChange={update("caseNumber")}
           />
         </Field>
-        <Field label="בית משפט / ערכאה">
-          <input
+       <Field label="בית משפט / ערכאה">
+          <InAppAutocomplete
             className={inputCls}
-            list="courts-list"
+            options={COURTS}
             placeholder="בחרו או הקלידו שם בית משפט"
             value={form.court}
             onChange={update("court")}
           />
-          <datalist id="courts-list">
-            {COURTS.map((c) => (
-              <option key={c} value={c} />
-            ))}
-          </datalist>
         </Field>
         <Field label="תובע / מבקש">
           <input className={inputCls} placeholder="שם הצד המגיש" value={form.plaintiff} onChange={update("plaintiff")} />
@@ -4647,23 +4642,17 @@ function NewOrderForm({ onCreate }) {
             />
           </div>
         </Field>
-        <Field label="עיר (קובעת את אזור התמחור)" required>
+      <Field label="עיר (קובעת את אזור התמחור)" required>
           <div className="relative">
-            <Building2 className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <input
+            <InAppAutocomplete
+              icon={Building2}
               className={inputCls + " pr-9" + (cityError ? " border-rose-400" : "")}
-              list="cities-list"
+              options={CITIES}
               placeholder="התחילו להקליד שם יישוב…"
               value={form.city}
               onChange={(e) => { setCityError(false); update("city")(e); }}
-              autoComplete="off"
               required
             />
-            <datalist id="cities-list">
-              {PRICING_ZONES.flatMap((z) => z.cities.map((c) => (
-                <option key={c} value={c} label={`${zoneLabelFor(c)} — ${formatILS(z.price)}`} />
-              )))}
-            </datalist>
             {cityError && <p className="mt-1 text-xs text-rose-600">יש לבחור יישוב מהרשימה</p>}
             {!cityError && normalizeCity(form.city) && (
               <p className="mt-1 text-xs text-slate-500">{zoneLabelFor(normalizeCity(form.city))} — {formatILS(zoneForCity(normalizeCity(form.city)).price)}</p>
@@ -5663,8 +5652,52 @@ function LawyerPortal({ orders, onCreate, onCancelOrder, onDeleteOrder, onLawyer
                 />
               </div>
             </div>
+{/* תצוגת כרטיסים מלאה למובייל — ללא חיתוך וללא גלילה אופקית */}
+            <div className="space-y-3 sm:hidden">
+              {filtered.map((o) => (
+                <div key={o.id} className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4 shadow-sm">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="font-bold text-slate-900">{o.recipientName}</p>
+                      <p className="text-xs text-slate-500">מס' הזמנה: {formatOrderNum(o.id)} {o.caseNumber ? `· תיק ${o.caseNumber}` : ""}</p>
+                    </div>
+                    <StatusBadge status={o.status} />
+                  </div>
+                  <p className="mt-2 text-sm text-slate-700">📍 {o.street} {o.houseNumber}, {o.city}</p>
+                  <p className="mt-1 text-xs text-slate-500">📄 {o.docType} · מחיר: <strong className="text-slate-800">{formatILS(calcClientPrice(o).total)}</strong></p>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    <ServiceChips order={o} />
+                    <AffidavitBadge order={o} />
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-200/70 pt-3">
+                    <button onClick={() => setSelectedId(o.id)} className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700">
+                      פרטים מלאים
+                    </button>
+                    {!isOrderCancelled(o) && (
+                      <button onClick={() => printWaybillLabel(o)} className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700">
+                        🏷️ מדבקת ברקוד
+                      </button>
+                    )}
+                    {canCancelOrder(o) && onCancelOrder && (
+                      <button onClick={() => setCancelId(o.id)} className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700">
+                        ביטול מסירה
+                      </button>
+                    )}
+                    {isAffidavitSigned(o) && (
+                      <button onClick={() => setAffidavitId(o.id)} className="rounded-lg bg-[#0a0a0a] px-3 py-1.5 text-xs font-semibold text-white">
+                        {usesAffidavit(o) ? "תצהיר חתום" : "אישור מסירה"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {filtered.length === 0 && (
+                <p className="py-6 text-center text-sm text-slate-400">לא נמצאו מסירות תואמות</p>
+              )}
+            </div>
 
-            <div className="overflow-x-auto">
+            {/* הטבלה המקורית מוסתרת במובייל ומוצגת רק במסכים גדולים */}
+            <div className="hidden overflow-x-auto sm:block">
               <table className="w-full min-w-[820px] text-sm">
                 <thead>
                   <tr className="border-b border-slate-200/60 text-right text-xs text-slate-400">
