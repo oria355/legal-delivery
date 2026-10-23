@@ -71,14 +71,118 @@ import {
    ========================================================================= */
 function useHeebo() {
   useEffect(() => {
-    if (document.getElementById("heebo-font-link")) return;
-    const link = document.createElement("link");
-    link.id = "heebo-font-link";
-    link.rel = "stylesheet";
-    link.href =
-      "https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap";
-    document.head.appendChild(link);
+    if (!document.getElementById("heebo-font-link")) {
+      const link = document.createElement("link");
+      link.id = "heebo-font-link";
+      link.rel = "stylesheet";
+      link.href = "https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap";
+      document.head.appendChild(link);
+    }
+    if (!document.getElementById("mesirot-official-theme")) {
+      const st = document.createElement("style");
+      st.id = "mesirot-official-theme";
+      st.textContent = `
+        /* עיצוב רשמי ונקי תואם כרטיס ביקור מסירות אקספרס */
+        body, .bg-\\[\\#f8f9fa\\] { background-color: #f4f5f7 !important; }
+        .pointer-events-none.fixed.inset-0.-z-10 { display: none !important; }
+        .from-indigo-600, .to-blue-600, .via-indigo-600, .from-indigo-700 {
+          --tw-gradient-from: #0a0a0a !important;
+          --tw-gradient-to: #1f2937 !important;
+          --tw-gradient-stops: #0a0a0a, #1f2937 !important;
+        }
+        .bg-indigo-600, .hover\\:bg-indigo-700:hover { background-color: #0a0a0a !important; }
+        .text-indigo-700, .text-indigo-800, .text-indigo-600 { color: #0a0a0a !important; }
+        .border-indigo-500, .border-indigo-600, .focus\\:border-indigo-500:focus { border-color: #0a0a0a !important; }
+        .bg-indigo-50, .bg-indigo-50\\/50, .bg-indigo-50\\/40 { background-color: #f1f5f9 !important; }
+        .ring-indigo-200, .ring-indigo-300 { --tw-ring-color: #cbd5e1 !important; }
+        /* מניעת הסתרת שדות על ידי סרגל הניווט התחתון בזמן הקלדה בנייד */
+        @media (max-width: 640px) {
+          body:has(input:focus, textarea:focus, select:focus) nav.fixed,
+          body:has(input:focus, textarea:focus, select:focus) #a11y-root {
+            display: none !important;
+          }
+        }
+      `;
+      document.head.appendChild(st);
+    }
+    try {
+      const c = document.createElement("canvas");
+      c.width = 192;
+      c.height = 192;
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#0a0a0a";
+      ctx.fillRect(0, 0, 192, 192);
+      ctx.strokeStyle = "#2e2e2e";
+      ctx.lineWidth = 24;
+      ctx.beginPath();
+      ctx.ellipse(62, 72, 68, 86, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "800 84px Heebo, Arial, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("מ", 104, 108);
+      const iconUrl = c.toDataURL("image/png");
+      let apple = document.querySelector("link[rel='apple-touch-icon']");
+      if (!apple) {
+        apple = document.createElement("link");
+        apple.rel = "apple-touch-icon";
+        document.head.appendChild(apple);
+      }
+      apple.href = iconUrl;
+    } catch (e) {}
   }, []);
+}
+
+function InAppAutocomplete({ value, onChange, options = [], placeholder, className, required, icon: Icon }) {
+  const [open, setOpen] = useState(false);
+  const filtered = useMemo(() => {
+    const q = String(value || "").trim();
+    if (!q) return options.slice(0, 30);
+    return options.filter((o) => o.includes(q)).slice(0, 30);
+  }, [value, options]);
+
+  return (
+    <div className="relative w-full">
+      {Icon && <Icon className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />}
+      <input
+        type="text"
+        className={className}
+        placeholder={placeholder}
+        value={value}
+        required={required}
+        autoComplete="off"
+        autoCorrect="off"
+        spellCheck="false"
+        onFocus={(e) => {
+          setOpen(true);
+          setTimeout(() => e.target.scrollIntoView({ behavior: "smooth", block: "center" }), 200);
+        }}
+        onBlur={() => setTimeout(() => setOpen(false), 180)}
+        onChange={(e) => {
+          onChange(e);
+          setOpen(true);
+        }}
+      />
+      {open && filtered.length > 0 && (
+        <ul className="absolute left-0 right-0 top-full z-50 mt-1 max-h-52 overflow-y-auto rounded-2xl border border-slate-300 bg-white py-1 shadow-2xl">
+          {filtered.map((item) => (
+            <li
+              key={item}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onChange({ target: { value: item } });
+                setOpen(false);
+              }}
+              className="cursor-pointer border-b border-slate-100 px-3.5 py-2.5 text-right text-sm font-medium text-slate-800 last:border-0 hover:bg-slate-100 active:bg-slate-200"
+            >
+              {item}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 /* =========================================================================
@@ -3991,10 +4095,10 @@ function useCopyToast() {
 function ReferralShare({ code }) {
   const [toast, copy] = useCopyToast();
   const [installOpen, setInstallOpen] = useState(false);
-  const baseLink = referralLinkFor(code);
-  if (!baseLink) return null;
-  const link = `${baseLink}&install=1`;
-  const qrSvg = qrSvgString(qrEncode(link, "Q"), { quiet: 4 });
+  const cleanCode = String(code || "").replace(/[^A-Z0-9-]/gi, "").toUpperCase();
+  const link = cleanCode ? `https://mesirot.express/?ref=${cleanCode}` : "";
+  if (!link) return null;
+  const qrImgUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&ecc=M&margin=10&data=${encodeURIComponent(link)}`;
 
   const handleQrClick = async () => {
     if (deferredInstallPrompt && typeof deferredInstallPrompt.prompt === "function") {
@@ -4011,8 +4115,8 @@ function ReferralShare({ code }) {
 
   return (
     <div>
-      <p className="text-[11px] font-medium text-slate-400">הקישור האישי שלכם (כולל הורדת אפליקציה + הטבה)</p>
-      <p dir="ltr" className="mt-1 select-all break-all rounded-xl bg-white px-3 py-2 text-left text-xs text-slate-700 ring-1 ring-slate-200">
+      <p className="text-[11px] font-medium text-slate-500">הקישור האישי שלכם להטבת חבר מביא חבר</p>
+      <p dir="ltr" className="mt-1 select-all break-all rounded-xl bg-white px-3 py-2 text-left text-xs text-slate-800 ring-1 ring-slate-200">
         {link}
       </p>
       <button
@@ -4020,18 +4124,17 @@ function ReferralShare({ code }) {
         onClick={() => copy(link, "הקישור הועתק ✓")}
         className="mt-2 w-full rounded-xl bg-[#0a0a0a] px-4 py-2.5 text-sm font-bold text-white hover:bg-neutral-800"
       >
-        📋 העתק קישור הטבה והורדה
+        📋 העתק קישור אישי
       </button>
       <div
         onClick={handleQrClick}
         role="button"
         tabIndex={0}
-        title="לחצו או סרקו לפתיחת הורדת האפליקציה וקבלת ההטבה"
         className="mt-3 cursor-pointer rounded-2xl bg-white p-4 text-center ring-2 ring-[#0a0a0a] transition hover:bg-slate-50"
       >
-        <div dir="ltr" className="mx-auto max-w-[190px] [&>svg]:h-auto [&>svg]:w-full" dangerouslySetInnerHTML={{ __html: qrSvg }} />
-        <p dir="ltr" className="mt-2 font-mono text-xs font-bold tracking-widest text-slate-800">{code}</p>
-        <p className="mt-1 text-xs font-semibold text-indigo-700">📲 סרקו או לחצו על ה-QR להורדת האפליקציה וקבלת ההטבה</p>
+        <img src={qrImgUrl} alt="QR Code" width={190} height={190} className="mx-auto block rounded-lg" />
+        <p dir="ltr" className="mt-2 font-mono text-xs font-bold tracking-widest text-slate-900">{cleanCode}</p>
+        <p className="mt-1 text-xs font-semibold text-slate-700">📲 סרקו להצטרפות עם ההטבה או לחצו להתקנת האפליקציה</p>
       </div>
       <InstallGuideModal open={installOpen} onClose={() => setInstallOpen(false)} />
       <CopyToast toast={toast} />
@@ -12399,7 +12502,7 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
   };
 
   const titles = {
-    in: { title: "התחברות למערכת", sub: "מסירות משפטיות", icon: Gavel },
+   in: { title: "התחברות למערכת", sub: "מסירות אקספרס — שליחויות משפטיות", icon: Gavel },
     lawyer: { title: "פתיחת חשבון", sub: "משרד עורכי דין / חברה", icon: Briefcase },
     courier: { title: "בקשת הצטרפות לשליחים", sub: "מלאו את הפרטים ונחזור אליכם לאחר אישור", icon: Truck },
     sent: { title: "בדקו את תיבת הדואר", sub: "נשלח אליכם מייל אימות", icon: Mail },
