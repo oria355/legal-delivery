@@ -3990,26 +3990,50 @@ function useCopyToast() {
 // Personal link + copy button + Code 128 barcode of the signed code.
 function ReferralShare({ code }) {
   const [toast, copy] = useCopyToast();
-  const link = referralLinkFor(code);
-  if (!link) return null;
+  const [installOpen, setInstallOpen] = useState(false);
+  const baseLink = referralLinkFor(code);
+  if (!baseLink) return null;
+  const link = `${baseLink}&install=1`;
+  const qrSvg = qrSvgString(qrEncode(link, "Q"), { quiet: 4 });
+
+  const handleQrClick = async () => {
+    if (deferredInstallPrompt && typeof deferredInstallPrompt.prompt === "function") {
+      try {
+        deferredInstallPrompt.prompt();
+        await deferredInstallPrompt.userChoice;
+        deferredInstallPrompt = null;
+        notifyInstall();
+        return;
+      } catch (e) {}
+    }
+    setInstallOpen(true);
+  };
+
   return (
     <div>
-      <p className="text-[11px] font-medium text-slate-400">הקישור האישי שלכם</p>
+      <p className="text-[11px] font-medium text-slate-400">הקישור האישי שלכם (כולל הורדת אפליקציה + הטבה)</p>
       <p dir="ltr" className="mt-1 select-all break-all rounded-xl bg-white px-3 py-2 text-left text-xs text-slate-700 ring-1 ring-slate-200">
         {link}
       </p>
       <button
         type="button"
         onClick={() => copy(link, "הקישור הועתק ✓")}
-        className="mt-2 w-full rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-bold text-white hover:bg-amber-600"
+        className="mt-2 w-full rounded-xl bg-[#0a0a0a] px-4 py-2.5 text-sm font-bold text-white hover:bg-neutral-800"
       >
-        📋 העתק קישור אישי
+        📋 העתק קישור הטבה והורדה
       </button>
-      <div className="mt-3 rounded-2xl bg-white p-3 text-center ring-1 ring-slate-200">
-        <div dir="ltr" className="mx-auto max-w-[280px]" dangerouslySetInnerHTML={{ __html: code128Svg(code, { height: 56, module: 2 }) }} />
-        <p dir="ltr" className="mt-1 font-mono text-xs tracking-widest text-slate-600">{code}</p>
-        <p className="mt-1 text-[10px] text-slate-400">ברקוד (Code 128) של קוד ההפניה האישי</p>
+      <div
+        onClick={handleQrClick}
+        role="button"
+        tabIndex={0}
+        title="לחצו או סרקו לפתיחת הורדת האפליקציה וקבלת ההטבה"
+        className="mt-3 cursor-pointer rounded-2xl bg-white p-4 text-center ring-2 ring-[#0a0a0a] transition hover:bg-slate-50"
+      >
+        <div dir="ltr" className="mx-auto max-w-[190px] [&>svg]:h-auto [&>svg]:w-full" dangerouslySetInnerHTML={{ __html: qrSvg }} />
+        <p dir="ltr" className="mt-2 font-mono text-xs font-bold tracking-widest text-slate-800">{code}</p>
+        <p className="mt-1 text-xs font-semibold text-indigo-700">📲 סרקו או לחצו על ה-QR להורדת האפליקציה וקבלת ההטבה</p>
       </div>
+      <InstallGuideModal open={installOpen} onClose={() => setInstallOpen(false)} />
       <CopyToast toast={toast} />
     </div>
   );
