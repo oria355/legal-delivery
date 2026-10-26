@@ -82,23 +82,22 @@ function useHeebo() {
       const st = document.createElement("style");
       st.id = "mesirot-official-theme";
       st.textContent = `
-        /* עיצוב רשמי ונקי תואם כרטיס ביקור מסירות אקספרס */
-        body, .bg-\\[\\#f8f9fa\\] { background-color: #f4f5f7 !important; }
+       /* עיצוב כרטיס ביקור - שחור יוקרתי למסירות אקספרס */
+        body, html, #root, .bg-\\[\\#f8f9fa\\] { background-color: #050505 !important; color: #ffffff !important; }
+        .bg-white, .bg-slate-50, .bg-slate-50\\/50 { background-color: #121212 !important; color: #ffffff !important; border-color: #2a2a2a !important; }
+        .text-slate-900, .text-slate-800, .text-slate-700, .text-indigo-700, .text-[#0a0a0a] { color: #ffffff !important; }
+        .text-slate-500, .text-slate-400 { color: #a1a1aa !important; }
+        .border, .border-b, .border-slate-200, .border-slate-100, .border-slate-200\\/60 { border-color: #2a2a2a !important; }
+        .ring-1, .ring-2, .ring-slate-200 { --tw-ring-color: #2a2a2a !important; }
+        input, select, textarea { background-color: #1a1a1a !important; color: #ffffff !important; border-color: #333 !important; }
+        input::placeholder { color: #71717a !important; }
+        .shadow-sm, .shadow-md, .shadow-2xl { box-shadow: 0 4px 20px rgba(0,0,0,0.5) !important; }
+        .bg-\\[\\#0a0a0a\\], .bg-indigo-600 { background-color: #ffffff !important; color: #000000 !important; font-weight: bold; }
         .pointer-events-none.fixed.inset-0.-z-10 { display: none !important; }
-        .from-indigo-600, .to-blue-600, .via-indigo-600, .from-indigo-700 {
-          --tw-gradient-from: #0a0a0a !important;
-          --tw-gradient-to: #1f2937 !important;
-          --tw-gradient-stops: #0a0a0a, #1f2937 !important;
-        }
-        .bg-indigo-600, .hover\\:bg-indigo-700:hover { background-color: #0a0a0a !important; }
-        .text-indigo-700, .text-indigo-800, .text-indigo-600 { color: #0a0a0a !important; }
-        .border-indigo-500, .border-indigo-600, .focus\\:border-indigo-500:focus { border-color: #0a0a0a !important; }
-        .bg-indigo-50, .bg-indigo-50\\/50, .bg-indigo-50\\/40 { background-color: #f1f5f9 !important; }
-        .ring-indigo-200, .ring-indigo-300 { --tw-ring-color: #cbd5e1 !important; }
-        /* מניעת הסתרת שדות על ידי סרגל הניווט התחתון בזמן הקלדה בנייד */
         @media (max-width: 640px) {
           body:has(input:focus, textarea:focus, select:focus) nav.fixed,
-          body:has(input:focus, textarea:focus, select:focus) #a11y-root {
+          body:has(input:focus, textarea:focus, select:focus) #a11y-root { display: none !important; }
+        }
             display: none !important;
           }
         }
@@ -13905,11 +13904,55 @@ function AppShell({ profile, onSignOut, referredBy = "", referralDeviceMatch = f
     </SessionContext.Provider>
   );
 }
+function WhatsAppFloat() {
+  const text = encodeURIComponent("אהלן אוריה יש לי תקלה/משהו שלא ברור לי, אשמח לעזרתך");
+  return (
+    <a href={`https://wa.me/972537241178?text=${text}`} target="_blank" rel="noreferrer"
+       className="fixed bottom-20 left-4 z-[9999] flex h-14 w-14 items-center justify-center rounded-full bg-[#25D366] text-white shadow-lg transition-transform hover:scale-110 sm:bottom-6">
+      <svg viewBox="0 0 24 24" fill="currentColor" className="h-8 w-8">
+        <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+      </svg>
+    </a>
+  );
+}
 
+function LiveNotificationBanner() {
+  const [newOrder, setNewOrder] = useState(null);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel('public:orders')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' }, (payload) => {
+        setNewOrder(payload.new);
+        if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+        setTimeout(() => setNewOrder(null), 12000);
+      })
+      .subscribe();
+    return () => supabase.removeChannel(channel);
+  }, []);
+
+  if (!newOrder) return null;
+
+  return (
+    <div className="fixed top-6 left-1/2 z-[9999] w-11/12 max-w-md -translate-x-1/2 transform rounded-2xl border border-[#333] bg-[#111] p-4 text-white shadow-2xl transition-all">
+      <div className="flex items-center gap-3">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-black text-lg">
+          🔔
+        </div>
+        <div>
+          <p className="text-sm font-bold">הזמנה חדשה התקבלה!</p>
+          <p className="text-xs text-slate-400">{newOrder.city} {newOrder.street ? `• ${newOrder.street}` : ""}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
 export default function App() {
   return (
     <>
       <AppInner />
+      <WhatsAppFloat />
+      <LiveNotificationBanner />
       <AccessibilityWidget />
     </>
   );
