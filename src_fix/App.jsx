@@ -67,7 +67,14 @@ import {
 } from "lucide-react";
 
 /* =========================================================================
-   import logoUrl from "../logo-express.jpeg";
+   Brand: logo image, Heebo font and the white page with a faint logo watermark.
+   The CSS is injected once at runtime; no external stylesheet is needed.
+   ========================================================================= */
+const logoUrl = "/brand/logo.png";
+const BRAND_CSS = `
+body{background:#ffffff}
+body::before{content:"";position:fixed;inset:0;background:url("${logoUrl}") no-repeat center 42% / min(72vw,460px);opacity:.07;pointer-events:none;z-index:-1}
+`;
 
 function useHeebo() {
   useEffect(() => {
@@ -78,65 +85,12 @@ function useHeebo() {
       link.href = "https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap";
       document.head.appendChild(link);
     }
-    if (!document.getElementById("mesirot-official-theme")) {
+    if (!document.getElementById("mesirot-brand-css")) {
       const st = document.createElement("style");
-      st.id = "mesirot-official-theme";
-      st.textContent = `
-        /* עיצוב בהיר ויוקרתי עם לוגו רקע - מסירות אקספרס */
-        body {
-          background-color: #f8f9fa !important;
-        }
-        .bg-\\[\\#f8f9fa\\] {
-          background-color: transparent !important;
-        }
-        body::before {
-          content: "";
-          position: fixed;
-          top: 0; left: 0; right: 0; bottom: 0;
-          background-image: url('${logoUrl}');
-          background-repeat: no-repeat;
-          background-position: center;
-          background-size: min(500px, 75vw);
-          opacity: 0.08;
-          z-index: 0;
-          pointer-events: none;
-          mix-blend-mode: multiply;
-        }
-        #root {
-          position: relative;
-          z-index: 1;
-        }
-        @media (max-width: 640px) {
-          body:has(input:focus, textarea:focus, select:focus) nav.fixed,
-          body:has(input:focus, textarea:focus, select:focus) #a11y-root { display: none !important; }
-        }
-      `;
+      st.id = "mesirot-brand-css";
+      st.textContent = BRAND_CSS;
       document.head.appendChild(st);
     }
-    try {
-      let apple = document.querySelector("link[rel='apple-touch-icon']");
-      if (!apple) {
-        apple = document.createElement("link");
-        apple.rel = "apple-touch-icon";
-        document.head.appendChild(apple);
-      }
-      apple.href = logoUrl;
-      let fav = document.querySelector("link[rel='icon']");
-      if (!fav) {
-        fav = document.createElement("link");
-        fav.rel = "icon";
-        document.head.appendChild(fav);
-      }
-      fav.href = logoUrl;
-    } catch (e) {}
-  }, []);
-}
-        apple = document.createElement("link");
-        apple.rel = "apple-touch-icon";
-        document.head.appendChild(apple);
-      }
-      apple.href = iconUrl;
-    } catch (e) {}
   }, []);
 }
 
@@ -3750,9 +3704,7 @@ function TopNav({ view, setView }) {
       <div className="mx-auto max-w-7xl px-4 py-3 sm:px-6">
         <div className="flex items-center justify-between gap-2 sm:gap-4">
           <div className="flex min-w-0 items-center gap-2.5">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 to-blue-600 text-white">
-              <Gavel className="h-5 w-5" />
-            </div>
+            <img src="/brand/scales.png" alt="מסירות משפטיות" className="h-9 w-auto shrink-0 object-contain" />
             <div className="min-w-0 leading-tight">
               <p className="truncate text-sm font-extrabold text-indigo-700">מסירות משפטיות</p>
               <p className="hidden text-[11px] text-slate-400 sm:block">
@@ -12339,7 +12291,7 @@ function ResetPasswordScreen({ onUpdate, onSignOut }) {
     setBusy(false);
   };
   return (
-    <div dir="rtl" style={{ fontFamily: "'Heebo', sans-serif" }} className="flex min-h-screen items-center justify-center bg-[#f8f9fa] px-4 py-8">
+    <div dir="rtl" style={{ fontFamily: "'Heebo', sans-serif" }} className="flex min-h-screen items-center justify-center bg-transparent px-4 py-8">
       <form onSubmit={submit} className="w-full max-w-sm rounded-3xl border border-slate-200/60 bg-white p-6 shadow-sm">
         <div className="mb-5 flex items-center gap-2.5">
           <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 to-blue-600 text-white">
@@ -12380,7 +12332,7 @@ function ResetPasswordScreen({ onUpdate, onSignOut }) {
 
 function FullScreenLoader({ text = "טוען..." }) {
   return (
-    <div dir="rtl" className="flex min-h-screen items-center justify-center bg-[#f8f9fa]" style={{ fontFamily: "'Heebo', sans-serif" }}>
+    <div dir="rtl" className="flex min-h-screen items-center justify-center bg-transparent" style={{ fontFamily: "'Heebo', sans-serif" }}>
       <div className="flex items-center gap-2 text-sm font-medium text-slate-500">
         <RefreshCw className="h-4 w-4 animate-spin" /> {text}
       </div>
@@ -12549,7 +12501,7 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
     <div
       dir="rtl"
       style={{ fontFamily: "'Heebo', sans-serif" }}
-      className="flex min-h-screen items-center justify-center bg-[#f8f9fa] px-4 py-8"
+      className="flex min-h-screen items-center justify-center bg-transparent px-4 py-8"
     >
       <div
         className={`w-full rounded-3xl border border-slate-200/60 bg-white p-6 shadow-sm ${
@@ -12906,7 +12858,7 @@ function PendingApprovalScreen({ profile, onRefresh, onSignOut }) {
     <div
       dir="rtl"
       style={{ fontFamily: "'Heebo', sans-serif" }}
-      className="flex min-h-screen items-center justify-center bg-[#f8f9fa] px-4"
+      className="flex min-h-screen items-center justify-center bg-transparent px-4"
     >
       <div className="w-full max-w-sm rounded-3xl border border-slate-200/60 bg-white p-6 text-center shadow-sm">
         <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-amber-50 text-amber-600">
@@ -12962,9 +12914,9 @@ const A11Y_CSS = `
 html.a11y-t1{font-size:115%}
 html.a11y-t2{font-size:130%}
 html.a11y-gray{filter:grayscale(1)}
-html.a11y-contrast body{background:#000!important;color:#fff!important}
-html.a11y-contrast body *:not(#a11y-root):not(#a11y-root *){background-color:#000!important;color:#fff!important;border-color:#fff!important;box-shadow:none!important}
-html.a11y-contrast body a{color:#ff0!important}
+html.a11y-contrast body{background:#fff!important;color:#000!important}
+html.a11y-contrast body *:not(#a11y-root):not(#a11y-root *){background-color:#fff!important;color:#000!important;border-color:#000!important;box-shadow:none!important}
+html.a11y-contrast body a{color:#1d4ed8!important}
 html.a11y-links a,html.a11y-links button,html.a11y-links [role="button"]{outline:3px solid #f59e0b!important;outline-offset:2px;text-decoration:underline!important}
 html.a11y-motion *,html.a11y-motion *::before,html.a11y-motion *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
 #a11y-root button:focus-visible{outline:3px solid #2563eb;outline-offset:2px}
@@ -13135,7 +13087,7 @@ function AppInner() {
     return DEMO_ALLOWED ? (
       <AppShell profile={null} />
     ) : (
-      <div dir="rtl" className="flex min-h-screen items-center justify-center bg-[#f8f9fa] px-4 text-center text-sm font-medium text-slate-500" style={{ fontFamily: "'Heebo', sans-serif" }}>
+      <div dir="rtl" className="flex min-h-screen items-center justify-center bg-transparent px-4 text-center text-sm font-medium text-slate-500" style={{ fontFamily: "'Heebo', sans-serif" }}>
         המערכת אינה מוגדרת כראוי (חסרים פרטי חיבור). פנו למנהל המערכת.
       </div>
     );
@@ -13809,7 +13761,7 @@ function AppShell({ profile, onSignOut, referredBy = "", referralDeviceMatch = f
     <div
       dir="rtl"
       style={{ fontFamily: "'Heebo', sans-serif" }}
-      className="relative min-h-screen overflow-x-hidden bg-[#f8f9fa]"
+      className="relative min-h-screen overflow-x-hidden bg-transparent"
     >
       {/* Ambient Gemini-style gradient glows — fixed, decorative, non-interactive */}
       <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
@@ -13927,6 +13879,7 @@ function LiveNotificationBanner() {
   const [newOrder, setNewOrder] = useState(null);
 
   useEffect(() => {
+    if (!supabase) return undefined; // demo mode: no live channel
     const channel = supabase
       .channel('public:orders')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' }, (payload) => {
@@ -13959,7 +13912,7 @@ export default function App() {
     <>
       <AppInner />
       <WhatsAppFloat />
-      <LiveNotificationBanner />
+      {/* <LiveNotificationBanner /> — not mounted: it showed customer street addresses to every signed-in role. The admin alerts are handled by useAdminOrderAlerts. */}
       <AccessibilityWidget />
     </>
   );
