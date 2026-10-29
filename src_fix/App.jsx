@@ -82,23 +82,23 @@ function useHeebo() {
       const st = document.createElement("style");
       st.id = "mesirot-official-theme";
       st.textContent = `
-       /* עיצוב כרטיס ביקור - שחור יוקרתי למסירות אקספרס */
-        body, html, #root, .bg-\\[\\#f8f9fa\\] { background-color: #050505 !important; color: #ffffff !important; }
-        .bg-white, .bg-slate-50, .bg-slate-50\\/50 { background-color: #121212 !important; color: #ffffff !important; border-color: #2a2a2a !important; }
-        .text-slate-900, .text-slate-800, .text-slate-700, .text-indigo-700, .text-[#0a0a0a] { color: #ffffff !important; }
-        .text-slate-500, .text-slate-400 { color: #a1a1aa !important; }
-        .border, .border-b, .border-slate-200, .border-slate-100, .border-slate-200\\/60 { border-color: #2a2a2a !important; }
-        .ring-1, .ring-2, .ring-slate-200 { --tw-ring-color: #2a2a2a !important; }
-        input, select, textarea { background-color: #1a1a1a !important; color: #ffffff !important; border-color: #333 !important; }
-        input::placeholder { color: #71717a !important; }
-        .shadow-sm, .shadow-md, .shadow-2xl { box-shadow: 0 4px 20px rgba(0,0,0,0.5) !important; }
-        .bg-\\[\\#0a0a0a\\], .bg-indigo-600 { background-color: #ffffff !important; color: #000000 !important; font-weight: bold; }
-        .pointer-events-none.fixed.inset-0.-z-10 { display: none !important; }
+       /* עיצוב בהיר ויוקרתי עם לוגו רקע - מסירות אקספרס */
+        body::before {
+          content: "";
+          position: fixed;
+          top: 0; left: 0; right: 0; bottom: 0;
+          background-image: url('/logo.jpeg'); /* <--- שנה כאן אם לתמונה קוראים אחרת */
+          background-repeat: no-repeat;
+          background-position: center;
+          background-size: 50%; /* גודל סימן המים ברקע */
+          opacity: 0.04; /* שקיפות עדינה מאוד כדי לא להפריע לקריאה */
+          z-index: -1;
+          pointer-events: none;
+        }
         @media (max-width: 640px) {
           body:has(input:focus, textarea:focus, select:focus) nav.fixed,
           body:has(input:focus, textarea:focus, select:focus) #a11y-root { display: none !important; }
         }
-            display: none !important;
           }
         }
       `;
