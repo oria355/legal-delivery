@@ -67,8 +67,8 @@ import {
 } from "lucide-react";
 
 /* =========================================================================
-   FONT INJECTION — Heebo (Google Fonts)
-   ========================================================================= */
+   import logoUrl from "../logo-express.jpeg";
+
 function useHeebo() {
   useEffect(() => {
     if (!document.getElementById("heebo-font-link")) {
@@ -82,48 +82,55 @@ function useHeebo() {
       const st = document.createElement("style");
       st.id = "mesirot-official-theme";
       st.textContent = `
-       /* עיצוב בהיר ויוקרתי עם לוגו רקע - מסירות אקספרס */
+        /* עיצוב בהיר ויוקרתי עם לוגו רקע - מסירות אקספרס */
+        body {
+          background-color: #f8f9fa !important;
+        }
+        .bg-\\[\\#f8f9fa\\] {
+          background-color: transparent !important;
+        }
         body::before {
           content: "";
           position: fixed;
           top: 0; left: 0; right: 0; bottom: 0;
-          background-image: url('/logo.jpeg'); /* <--- שנה כאן אם לתמונה קוראים אחרת */
+          background-image: url('${logoUrl}');
           background-repeat: no-repeat;
           background-position: center;
-          background-size: 50%; /* גודל סימן המים ברקע */
-          opacity: 0.04; /* שקיפות עדינה מאוד כדי לא להפריע לקריאה */
-          z-index: -1;
+          background-size: min(500px, 75vw);
+          opacity: 0.08;
+          z-index: 0;
           pointer-events: none;
+          mix-blend-mode: multiply;
+        }
+        #root {
+          position: relative;
+          z-index: 1;
         }
         @media (max-width: 640px) {
           body:has(input:focus, textarea:focus, select:focus) nav.fixed,
           body:has(input:focus, textarea:focus, select:focus) #a11y-root { display: none !important; }
         }
-          }
-        }
       `;
       document.head.appendChild(st);
     }
     try {
-      const c = document.createElement("canvas");
-      c.width = 192;
-      c.height = 192;
-      const ctx = c.getContext("2d");
-      ctx.fillStyle = "#0a0a0a";
-      ctx.fillRect(0, 0, 192, 192);
-      ctx.strokeStyle = "#2e2e2e";
-      ctx.lineWidth = 24;
-      ctx.beginPath();
-      ctx.ellipse(62, 72, 68, 86, 0, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "800 84px Heebo, Arial, sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("מ", 104, 108);
-      const iconUrl = c.toDataURL("image/png");
       let apple = document.querySelector("link[rel='apple-touch-icon']");
       if (!apple) {
+        apple = document.createElement("link");
+        apple.rel = "apple-touch-icon";
+        document.head.appendChild(apple);
+      }
+      apple.href = logoUrl;
+      let fav = document.querySelector("link[rel='icon']");
+      if (!fav) {
+        fav = document.createElement("link");
+        fav.rel = "icon";
+        document.head.appendChild(fav);
+      }
+      fav.href = logoUrl;
+    } catch (e) {}
+  }, []);
+}
         apple = document.createElement("link");
         apple.rel = "apple-touch-icon";
         document.head.appendChild(apple);
@@ -12549,13 +12556,13 @@ function LoginScreen({ onSignIn, onSignUpLawyer, onSignUpCourier, onResetPasswor
           mode === "courier" ? "max-w-lg" : "max-w-sm"
         }`}
       >
-        <div className="mb-5 flex items-center gap-2.5">
-          <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 to-blue-600 text-white">
-            <HeadIcon className="h-5 w-5" />
+       <div className="mb-5 flex items-center gap-3">
+          <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200">
+            <img src={logoUrl} alt="לוגו מסירות אקספרס" className="h-full w-full object-contain p-1" />
           </div>
           <div className="leading-tight">
-            <p className="text-base font-extrabold text-indigo-700">{head.title}</p>
-            <p className="text-xs text-slate-400">{head.sub}</p>
+            <p className="text-base font-extrabold text-slate-900">{head.title}</p>
+            <p className="text-xs text-slate-500">{head.sub}</p>
           </div>
         </div>
 
