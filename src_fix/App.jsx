@@ -3704,9 +3704,8 @@ function TopNav({ view, setView }) {
       <div className="mx-auto max-w-7xl px-4 py-3 sm:px-6">
         <div className="flex items-center justify-between gap-2 sm:gap-4">
           <div className="flex min-w-0 items-center gap-2.5">
-            <img src="/brand/scales.png" alt="מסירות משפטיות" className="h-9 w-auto shrink-0 object-contain" />
+            <img src="/brand/logo.png" alt="מסירות אקספרס — מסירות משפטיות" className="h-12 w-auto shrink-0 object-contain" />
             <div className="min-w-0 leading-tight">
-              <p className="truncate text-sm font-extrabold text-indigo-700">מסירות משפטיות</p>
               <p className="hidden text-[11px] text-slate-400 sm:block">
                 {signedIn ? `מחובר כ: ${session.profile.full_name} · סנכרון בזמן אמת` : "מצב הדגמה · החלפת תצוגה בין תפקידים"}
               </p>
