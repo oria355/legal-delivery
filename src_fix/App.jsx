@@ -9757,7 +9757,22 @@ function PushDiagnostics({ permission, push, onEnable, onTest }) {
     </div>
   );
 }
-
+// בדיקת עיכובים לפי מהירות השירות (אקספרס 24ש, דחוף 48ש, רגיל 5 ימים)
+function isOrderDelayed(o) {
+  if (!o || isOrderCompleted(o) || isOrderCancelled(o) || o.status === STATUS.PENDING) return false;
+  let created = parseStamp(o.createdDate);
+  if (!created) created = new window.Date(o.createdDate || o.createdAt);
+  if (!created || isNaN(created.getTime())) return false;
+  
+  const hoursElapsed = (window.Date.now() - created.getTime()) / (1000 * 60 * 60);
+  const speed = speedOf(o);
+  
+  if (speed === "express" && hoursElapsed > 24) return true;
+  if (speed === "urgent" && hoursElapsed > 48) return true;
+  if (speed === "standard" && hoursElapsed > 120) return true;
+  
+  return false;
+}
 function AdminDashboard({
   orders,
   responses = [],
@@ -9838,7 +9853,7 @@ function AdminDashboard({
       // so a completed "הדבקה" task actually leaves the courier's active list
       // and shows up here instead of staying stuck in limbo.
       delivered: orders.filter((o) => isOrderCompleted(o) && o.status !== STATUS.REFUSED && o.status !== STATUS.CANCELED).length,
-      needsAttention: orders.filter((o) => o.status === STATUS.REFUSED).length,
+      needsAttention: orders.filter((o) => o.status === STATUS.REFUSED || isOrderDelayed(o)).length,
     };
   }, [orders]);
 
@@ -9847,7 +9862,7 @@ function AdminDashboard({
     { key: STATUS.PENDING, label: "ממתינות לשיבוץ", value: counts.pending, icon: Clock, accent: "bg-amber-500", match: (o) => o.status === STATUS.PENDING },
     { key: STATUS.IN_PROGRESS, label: "בטיפול", value: counts.inProgress, icon: Truck, accent: "bg-blue-500", match: (o) => o.status === STATUS.IN_PROGRESS || o.status === STATUS.PENDING_NEXT_VISIT },
     { key: "completed", label: "הושלמו בהצלחה", value: counts.delivered, icon: BadgeCheck, accent: "bg-emerald-500", match: (o) => isOrderCompleted(o) && o.status !== STATUS.REFUSED && o.status !== STATUS.CANCELED },
-    { key: "attention", label: "דורשות טיפול", value: counts.needsAttention, icon: CircleAlert, accent: "bg-rose-500", match: (o) => o.status === STATUS.REFUSED },
+   { key: "attention", label: "דורשות טיפול", value: counts.needsAttention, icon: CircleAlert, accent: "bg-rose-500", match: (o) => o.status === STATUS.REFUSED || isOrderDelayed(o) },
     { key: "canceled", label: "בוטלו", value: counts.canceled, icon: X, accent: "bg-slate-400", match: (o) => o.status === STATUS.CANCELED },
   ];
 
