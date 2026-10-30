@@ -4,8 +4,8 @@ self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
 // Exact, final alert text. Deliberately contains NO customer data (lock screen safe).
-const NEW_ORDER_TITLE = "Mesirot Express";
-const NEW_ORDER_BODY = "מסירה חדשה (אבא תודה)";
+const NEW_ORDER_TITLE = "מסירה חדשה";
+const NEW_ORDER_BODY = "אבא תודה";
 
 // Tap: focus the open app and tell it which order to assign; if closed, open /#assign=<ORDER_ID>.
 self.addEventListener("notificationclick", (event) => {
