@@ -4,25 +4,61 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="icon" href="/logo-express.jpeg" />
+    <link rel="apple-touch-icon" href="/logo-express.jpeg" />
     <meta name="theme-color" content="#1e40af" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-    <meta name="apple-mobile-web-app-title" content="מסירות משפטיות" />
-    <title>מסירות משפטיות — מערכת ניהול מסירות</title>
+    <meta name="apple-mobile-web-app-title" content="מסירות אקספרס" />
+    <title>מסירות אקספרס — מערכת ניהול מסירות משפטיות</title>
     <meta name="description" content="מסירת מסמכים רשמית — הזמנה, מעקב ותצהיר מוסר דיגיטלי" />
     <link rel="canonical" href="https://mesirot.express/" />
     <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="מסירות משפטיות" />
-    <meta property="og:title" content="מסירות משפטיות — מערכת ניהול מסירות" />
+    <meta property="og:site_name" content="מסירות אקספרס" />
+    <meta property="og:title" content="מסירות אקספרס — מערכת ניהול מסירות משפטיות" />
     <meta property="og:description" content="מסירת מסמכים רשמית — הזמנה, מעקב ותצהיר מוסר דיגיטלי" />
     <meta property="og:url" content="https://mesirot.express/" />
     <meta property="og:locale" content="he_IL" />
-    <meta property="og:image" content="https://mesirot.express/brand/logo.png" />
+    <meta property="og:image" content="https://mesirot.express/logo-express.jpeg" />
+    <style>
+      /* רקע בהיר עם סימן מים של לוגו מסירות אקספרס */
+      body {
+        background-color: #f8f9fa !important;
+      }
+      .bg-\[\#f8f9fa\] {
+        background-color: transparent !important;
+      }
+      body::before {
+        content: "";
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background-image: url('/logo-express.jpeg');
+        background-repeat: no-repeat;
+        background-position: center;
+        background-size: min(520px, 80vw);
+        opacity: 0.08;
+        z-index: 0;
+        pointer-events: none;
+        mix-blend-mode: multiply;
+      }
+      #root {
+        position: relative;
+        z-index: 1;
+      }
+    </style>
+    <script>
+      /* תיקון אוטומטי לתמונת הלוגו בבאנר ובמסך הכניסה */
+      window.addEventListener('error', function(e) {
+        if (e.target && e.target.tagName === 'IMG' && !e.target.dataset.fallback) {
+          e.target.dataset.fallback = '1';
+          e.target.src = '/logo-express.jpeg';
+        }
+      }, true);
+    </script>
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
+    <script type="module" src="/src_fix/main.jsx"></script>
   </body>
 </html>
